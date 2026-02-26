@@ -2,17 +2,18 @@ import 'dotenv/config';
 import { requireEnv } from '../utils/helpers';
 
 export interface BrokerConfig {
+  /** Capital.com API key (My Account → API access) */
   apiKey: string;
-  accountId: string;
-  baseUrl: string;
-  streamUrl: string;
+  /** Capital.com login email */
+  identifier: string;
+  /** Capital.com login password */
+  password: string;
   isDemo: boolean;
 }
 
 export const brokerConfig: Readonly<BrokerConfig> = Object.freeze({
-  apiKey: requireEnv('OANDA_API_KEY'),
-  accountId: requireEnv('OANDA_ACCOUNT_ID'),
-  baseUrl: process.env.OANDA_BASE_URL || 'https://api-fxpractice.oanda.com/v3',
-  streamUrl: process.env.OANDA_STREAM_URL || 'https://stream-fxpractice.oanda.com/v3',
-  isDemo: process.env.OANDA_IS_DEMO !== 'false',
+  apiKey: requireEnv('CAPITAL_COM_API_KEY'),
+  identifier: requireEnv('CAPITAL_COM_IDENTIFIER'),
+  password: requireEnv('CAPITAL_COM_PASSWORD'),
+  isDemo: process.env.CAPITAL_COM_IS_DEMO !== 'false',
 });
