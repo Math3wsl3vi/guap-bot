@@ -1,0 +1,19 @@
+# Aider
+.aider*
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment files
+.env
+.env.local
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
