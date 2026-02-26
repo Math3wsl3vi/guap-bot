@@ -72,4 +72,51 @@ export class TechnicalIndicators {
 
     return result;
   }
+
+  /**
+   * MACD with configurable periods (defaults: 12/26/9).
+   * Returns arrays of the same length as `prices`; early values are NaN.
+   */
+  static calculateMACD(
+    prices: number[],
+    fastPeriod = 12,
+    slowPeriod = 26,
+    signalPeriod = 9,
+  ): MACDResult {
+    const emaFast = TechnicalIndicators.calculateEMA(prices, fastPeriod);
+    const emaSlow = TechnicalIndicators.calculateEMA(prices, slowPeriod);
+
+    // MACD line — only valid from index (slowPeriod - 1) onward
+    const macdLine: number[] = new Array(prices.length).fill(NaN);
+    for (let i = slowPeriod - 1; i < prices.length; i++) {
+      if (!isNaN(emaFast[i]) && !isNaN(emaSlow[i])) {
+        macdLine[i] = emaFast[i] - emaSlow[i];
+      }
+    }
+
+    // Extract valid MACD values and their original indices for signal EMA
+    const validMacd: number[] = [];
+    const validIndices: number[] = [];
+    for (let i = 0; i < macdLine.length; i++) {
+      if (!isNaN(macdLine[i])) {
+        validMacd.push(macdLine[i]);
+        validIndices.push(i);
+      }
+    }
+
+    const signalEMA = TechnicalIndicators.calculateEMA(validMacd, signalPeriod);
+
+    // Map signal EMA back to original indices
+    const signal: number[] = new Array(prices.length).fill(NaN);
+    const histogram: number[] = new Array(prices.length).fill(NaN);
+    for (let j = 0; j < validIndices.length; j++) {
+      const idx = validIndices[j];
+      if (!isNaN(signalEMA[j])) {
+        signal[idx] = signalEMA[j];
+        histogram[idx] = macdLine[idx] - signalEMA[j];
+      }
+    }
+
+    return { macd: macdLine, signal, histogram };
+  }
 }
