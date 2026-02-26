@@ -1,0 +1,29 @@
+{
+  "name": "guap-bot-backend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "nodemon --exec ts-node src/bot.ts",
+    "start": "ts-node src/bot.ts",
+    "build": "tsc",
+    "start:prod": "node dist/bot.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "ws": "^8.18.0",
+    "axios": "^1.7.0",
+    "pg": "^8.13.0",
+    "ioredis": "^5.4.0",
+    "winston": "^3.17.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^20.17.0",
+    "@types/express": "^4.17.0",
+    "@types/ws": "^8.5.0",
+    "@types/pg": "^8.11.0",
+    "ts-node": "^10.9.0",
+    "nodemon": "^3.1.0"
+  }
+}
