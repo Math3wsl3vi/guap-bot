@@ -33,4 +33,43 @@ export class TechnicalIndicators {
 
     return result;
   }
+
+  /**
+   * Relative Strength Index using Wilder's smoothed average (the standard).
+   * Returns an array of the same length as `prices`.
+   * The first `period` values are NaN.
+   */
+  static calculateRSI(prices: number[], period: number = 14): number[] {
+    if (period <= 0) throw new Error('RSI period must be > 0');
+    if (prices.length < period + 1) return new Array(prices.length).fill(NaN);
+
+    const result: number[] = new Array(prices.length).fill(NaN);
+
+    // Seed: average gain/loss over first `period` intervals
+    let avgGain = 0;
+    let avgLoss = 0;
+    for (let i = 1; i <= period; i++) {
+      const delta = prices[i] - prices[i - 1];
+      if (delta > 0) avgGain += delta;
+      else avgLoss += -delta;
+    }
+    avgGain /= period;
+    avgLoss /= period;
+
+    result[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+
+    // Wilder's smoothing for subsequent values
+    for (let i = period + 1; i < prices.length; i++) {
+      const delta = prices[i] - prices[i - 1];
+      const gain = delta > 0 ? delta : 0;
+      const loss = delta < 0 ? -delta : 0;
+
+      avgGain = (avgGain * (period - 1) + gain) / period;
+      avgLoss = (avgLoss * (period - 1) + loss) / period;
+
+      result[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+    }
+
+    return result;
+  }
 }
