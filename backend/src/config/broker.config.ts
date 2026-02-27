@@ -2,18 +2,23 @@ import 'dotenv/config';
 import { requireEnv } from '../utils/helpers';
 
 export interface BrokerConfig {
-  /** Capital.com API key (My Account → API access) */
-  apiKey: string;
-  /** Capital.com login email */
-  identifier: string;
-  /** Capital.com login password */
-  password: string;
+  /** Deriv app ID — get a free one at https://developers.deriv.com/docs/app-registration */
+  appId: string;
+  /** Deriv API token with Read + Trade + Payments scopes (app.deriv.com/account/api-token) */
+  apiToken: string;
+  /** false = live account, true = demo account (controlled by which token you use) */
   isDemo: boolean;
+  /**
+   * Leverage multiplier for Multiplier contracts.
+   * Supported values for frxXAUUSD: 5, 10, 20, 50, 100.
+   * Higher multiplier = larger position per dollar staked.
+   */
+  multiplier: number;
 }
 
 export const brokerConfig: Readonly<BrokerConfig> = Object.freeze({
-  apiKey: requireEnv('CAPITAL_COM_API_KEY'),
-  identifier: requireEnv('CAPITAL_COM_IDENTIFIER'),
-  password: requireEnv('CAPITAL_COM_PASSWORD'),
-  isDemo: process.env.CAPITAL_COM_IS_DEMO !== 'false',
+  appId:      requireEnv('DERIV_APP_ID'),
+  apiToken:   requireEnv('DERIV_API_TOKEN'),
+  isDemo:     process.env.DERIV_IS_DEMO !== 'false',
+  multiplier: parseInt(process.env.DERIV_MULTIPLIER ?? '100', 10),
 });

@@ -9,6 +9,8 @@ export interface RiskConfig {
   minRiskRewardRatio: number;
   maxSlippagePips: number;
   stalePositionTimeoutMinutes: number;
+  /** Broker minimum position size (units). Orders below this are blocked. */
+  minPositionSize: number;
 }
 
 // Mutable at runtime — the API server may update these values live.
@@ -20,4 +22,5 @@ export const riskConfig: RiskConfig = {
   minRiskRewardRatio: parseEnvNumber(process.env.MIN_RISK_REWARD_RATIO, 1.5),
   maxSlippagePips: parseEnvNumber(process.env.MAX_SLIPPAGE_PIPS, 2),
   stalePositionTimeoutMinutes: parseEnvNumber(process.env.STALE_POSITION_TIMEOUT_MINUTES, 30),
+  minPositionSize: parseEnvNumber(process.env.MIN_POSITION_SIZE, 1),
 };

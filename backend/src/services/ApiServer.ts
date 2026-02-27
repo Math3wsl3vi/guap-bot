@@ -9,6 +9,7 @@ import { DatabaseService } from './DatabaseService';
 import { RiskManager } from './RiskManager';
 import { strategyConfig } from '../config/strategy.config';
 import { riskConfig } from '../config/risk.config';
+import { INSTRUMENTS, getInstrumentConfig } from '../config/instruments.config';
 import { getLogBuffer } from '../utils/LogBuffer';
 import { logger } from '../utils/logger';
 
@@ -132,7 +133,55 @@ export class ApiServer {
     this.app.get('/api/positions', async (_req: Request, res: Response) => {
       try {
         const positions = await orderService.getOpenPositions();
-        res.json(positions);
+        // Map Position → frontend Trade shape so field names align
+        res.json(
+          positions.map((p) => ({
+            id: p.id,
+            brokerId: p.brokerId,
+            symbol: p.symbol,
+            type: p.type,
+            entryPrice: p.entryPrice,
+            currentPrice: p.currentPrice,
+            stopLoss: p.stopLoss,
+            takeProfit: p.takeProfit,
+            quantity: p.quantity,
+            profitLoss: p.unrealisedPnL,
+            profitLossPercent: p.unrealisedPnLPercent,
+            status: 'OPEN' as const,
+            openedAt: p.openedAt instanceof Date ? p.openedAt.toISOString() : p.openedAt,
+          })),
+        );
+      } catch (err) {
+        res.status(500).json({ error: (err as Error).message });
+      }
+    });
+
+    // ── POST /api/positions/:id/close ────────────────────────────────────────────
+    this.app.post('/api/positions/:id/close', async (req: Request, res: Response) => {
+      try {
+        const positionId = req.params.id;
+
+        // Get live positions to find current price
+        const livePositions = await orderService.getOpenPositions();
+        const position = livePositions.find((p) => p.id === positionId);
+        if (!position) {
+          res.status(404).json({ error: 'Position not found' });
+          return;
+        }
+
+        // Find the matching DB trade record by brokerId
+        const openTrades = await dbService.getOpenTrades();
+        const trade = openTrades.find((t) => t.brokerId === positionId);
+        if (!trade) {
+          res.status(404).json({ error: 'Trade record not found in database' });
+          return;
+        }
+
+        const update = await orderService.closePosition(positionId, position.currentPrice, trade);
+        await dbService.updateTrade(trade.id, update);
+
+        logger.info('Position closed via API', { component: 'ApiServer', positionId });
+        res.json({ success: true });
       } catch (err) {
         res.status(500).json({ error: (err as Error).message });
       }
@@ -257,9 +306,23 @@ export class ApiServer {
       }
     });
 
+    // ── GET /api/instruments ──────────────────────────────────────────────────────
+    this.app.get('/api/instruments', (_req: Request, res: Response) => {
+      res.json(
+        INSTRUMENTS.map((i) => ({
+          symbol: i.symbol,
+          label: i.label,
+          category: i.category,
+          pipSize: i.pipSize,
+          minPositionSize: i.minPositionSize,
+        })),
+      );
+    });
+
     // ── GET /api/strategy ─────────────────────────────────────────────────────────
     this.app.get('/api/strategy', (_req: Request, res: Response) => {
       res.json({
+        symbol: strategyConfig.symbol,
         emaFast: strategyConfig.emaFastPeriod,
         emaSlow: strategyConfig.emaSlowPeriod,
         rsiPeriod: strategyConfig.rsiPeriod,
@@ -282,9 +345,32 @@ export class ApiServer {
     });
 
     // ── PUT /api/strategy ─────────────────────────────────────────────────────────
-    this.app.put('/api/strategy', (req: Request, res: Response) => {
+    this.app.put('/api/strategy', async (req: Request, res: Response) => {
       try {
         const b = req.body as Record<string, unknown>;
+
+        // Symbol change — stop market data, swap symbol + instrument params, restart
+        if (b.symbol != null && String(b.symbol) !== strategyConfig.symbol) {
+          const newSymbol = String(b.symbol);
+          const wasRunning = botState.isRunning;
+
+          if (wasRunning) await this.cfg.onStop();
+
+          strategyConfig.symbol = newSymbol;
+
+          // Update instrument-derived risk params for the new market
+          const instrument = getInstrumentConfig(newSymbol);
+          riskConfig.minPositionSize = instrument.minPositionSize;
+
+          logger.info('Symbol changed — instrument params updated', {
+            component: 'ApiServer',
+            symbol: newSymbol,
+            pipSize: instrument.pipSize,
+            minPositionSize: instrument.minPositionSize,
+          });
+
+          if (wasRunning) await this.cfg.onStart();
+        }
 
         if (b.emaFast != null) strategyConfig.emaFastPeriod = Number(b.emaFast);
         if (b.emaSlow != null) strategyConfig.emaSlowPeriod = Number(b.emaSlow);

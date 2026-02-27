@@ -3,7 +3,8 @@ import { logger } from './utils/logger';
 import { brokerConfig } from './config/broker.config';
 import { strategyConfig } from './config/strategy.config';
 import { riskConfig } from './config/risk.config';
-import { CapitalComAdapter } from './services/CapitalComAdapter';
+import { getInstrumentConfig } from './config/instruments.config';
+import { DerivAdapter } from './services/DerivAdapter';
 import { MarketDataService } from './services/MarketDataService';
 import { OrderService } from './services/OrderService';
 import { DatabaseService } from './services/DatabaseService';
@@ -11,11 +12,7 @@ import { RiskManager } from './services/RiskManager';
 import { ApiServer, BotState } from './services/ApiServer';
 import { EMAScalpStrategy } from './strategies/EMAScalpStrategy';
 import { Candle } from './models/Candle';
-
-// XAU/USD pip size: 1 pip = $0.01 (smallest price increment on Capital.com)
-// Override via PIP_SIZE env if trading a different instrument.
-const PIP_SIZE = parseFloat(process.env.PIP_SIZE ?? '0.01');
-const API_PORT = parseInt(process.env.API_PORT ?? '3001');
+const API_PORT = parseInt(process.env.PORT ?? process.env.API_PORT ?? '3001');
 
 // ─── Bot state (shared with ApiServer) ────────────────────────────────────────
 
@@ -37,16 +34,19 @@ function recreateStrategy(): void {
 async function main(): Promise<void> {
   logger.info('=== GUAP-BOT Starting ===', { component: 'Bot' });
 
+  const startInstrument = getInstrumentConfig(strategyConfig.symbol);
   logger.info('Strategy config loaded', {
     component: 'Bot',
     symbol: strategyConfig.symbol,
+    instrumentLabel: startInstrument.label,
     timeframe: strategyConfig.timeframe,
     emaFast: strategyConfig.emaFastPeriod,
     emaSlow: strategyConfig.emaSlowPeriod,
     rsiPeriod: strategyConfig.rsiPeriod,
     takeProfitPips: strategyConfig.takeProfitPips,
     stopLossPips: strategyConfig.stopLossPips,
-    pipSize: PIP_SIZE,
+    pipSize: startInstrument.pipSize,
+    minPositionSize: startInstrument.minPositionSize,
   });
 
   logger.info('Risk config loaded', {
@@ -63,11 +63,11 @@ async function main(): Promise<void> {
 
   // ─── Services ──────────────────────────────────────────────────────────────
 
-  const adapter = new CapitalComAdapter({
-    apiKey: brokerConfig.apiKey,
-    identifier: brokerConfig.identifier,
-    password: brokerConfig.password,
-    isDemo: brokerConfig.isDemo,
+  const adapter = new DerivAdapter({
+    appId:      brokerConfig.appId,
+    apiToken:   brokerConfig.apiToken,
+    isDemo:     brokerConfig.isDemo,
+    multiplier: brokerConfig.multiplier,
   });
 
   const marketData = new MarketDataService(adapter);
@@ -176,11 +176,15 @@ async function main(): Promise<void> {
       const effectiveSlPips = signal.stopLossPips ?? strategyConfig.stopLossPips;
       const effectiveTpPips = signal.takeProfitPips ?? strategyConfig.takeProfitPips;
 
+      const instrument = getInstrumentConfig(strategyConfig.symbol);
+      const pipSize = instrument.pipSize;
+      const minPositionSize = Math.max(instrument.minPositionSize, riskConfig.minPositionSize);
+
       const size = riskManager.calculatePositionSize(
         account.balance,
         riskConfig.maxRiskPerTrade,
         effectiveSlPips,
-        PIP_SIZE,
+        pipSize,
       );
 
       if (size <= 0) {
@@ -188,10 +192,19 @@ async function main(): Promise<void> {
         return;
       }
 
+      if (size < minPositionSize) {
+        logger.warn(
+          `Calculated size ${size} is below broker minimum ${minPositionSize} for ${strategyConfig.symbol} — ` +
+          `account balance ($${account.balance.toFixed(2)}) is too low to open a position. Skipping.`,
+          { component: 'Bot', size, minPositionSize, symbol: strategyConfig.symbol, balance: account.balance },
+        );
+        return;
+      }
+
       // 6. SL/TP as absolute price levels
       const entry = candle.close;
-      const slDistance = effectiveSlPips * PIP_SIZE;
-      const tpDistance = effectiveTpPips * PIP_SIZE;
+      const slDistance = effectiveSlPips * pipSize;
+      const tpDistance = effectiveTpPips * pipSize;
 
       const stopLoss =
         signal.action === 'BUY' ? entry - slDistance : entry + slDistance;

@@ -9,6 +9,7 @@ import {
   PlaceOrderResult,
   TickData,
 } from './IBrokerAdapter';
+import { SYMBOL_MAP } from '../config/instruments.config';
 import { logger } from '../utils/logger';
 
 export interface CapitalComConfig {
@@ -34,18 +35,6 @@ const REST_BASE = {
 const WS_BASE = {
   demo: 'wss://demo-api-streaming-capital.backend-capital.com/connect',
   live: 'wss://api-streaming-capital.backend-capital.com/connect',
-};
-
-// Symbol map: internal name → Capital.com epic
-const SYMBOL_MAP: Record<string, string> = {
-  XAU_USD: 'GOLD',
-  XAUUSD: 'GOLD',
-  EUR_USD: 'EURUSD',
-  EURUSD: 'EURUSD',
-  GBP_USD: 'GBPUSD',
-  GBPUSD: 'GBPUSD',
-  USD_JPY: 'USDJPY',
-  USDJPY: 'USDJPY',
 };
 
 // Timeframe map: internal → Capital.com resolution string
