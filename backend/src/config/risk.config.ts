@@ -11,7 +11,8 @@ export interface RiskConfig {
   stalePositionTimeoutMinutes: number;
 }
 
-export const riskConfig: Readonly<RiskConfig> = Object.freeze({
+// Mutable at runtime — the API server may update these values live.
+export const riskConfig: RiskConfig = {
   maxRiskPerTrade: parseEnvNumber(process.env.MAX_RISK_PER_TRADE, 0.01),
   maxDailyLoss: parseEnvNumber(process.env.MAX_DAILY_LOSS, 0.03),
   maxDrawdown: parseEnvNumber(process.env.MAX_DRAWDOWN, 0.15),
@@ -19,4 +20,4 @@ export const riskConfig: Readonly<RiskConfig> = Object.freeze({
   minRiskRewardRatio: parseEnvNumber(process.env.MIN_RISK_REWARD_RATIO, 1.5),
   maxSlippagePips: parseEnvNumber(process.env.MAX_SLIPPAGE_PIPS, 2),
   stalePositionTimeoutMinutes: parseEnvNumber(process.env.STALE_POSITION_TIMEOUT_MINUTES, 30),
-});
+};

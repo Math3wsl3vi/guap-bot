@@ -5,13 +5,13 @@
 | Layer | Status | Notes |
 |---|---|---|
 | Frontend | Scaffolded | React + Vite + Shadcn. All pages, components, types, and Zustand store exist — running on mock data |
-| Backend | Phase 2 Complete | TechnicalIndicators (EMA/RSI/MACD), IBrokerAdapter interface, CapitalComAdapter, MarketDataService with rolling window + exponential backoff reconnect |
+| Backend | Phase 6 Complete | TechnicalIndicators (EMA/RSI/MACD), IBrokerAdapter interface, CapitalComAdapter (market data + order execution), MarketDataService with rolling window + exponential backoff reconnect, BaseStrategy, EMAScalpStrategy, RiskManager with circuit breakers, OrderService with retry logic, DatabaseService (PostgreSQL), bot.ts main event loop, ApiServer (Express REST + WebSocket, all Phase 5 endpoints), LogBuffer in-memory transport, Jest test suite (100 tests: 27 unit + 73 integration), backtesting runner |
 
 The frontend is ready and waiting. Every implementation task below is backend-first until Phase 5 when the two are wired together.
 
 ## Broker Selection
 
-OANDA is unavailable (country restriction). Alternative brokers for API-based forex/gold trading:
+Capital.com is the selected broker. Alternative brokers for API-based forex/gold trading:
 
 | Broker | API | XAU/USD | Free Demo | Best For |
 |--------|-----|---------|-----------|----------|
@@ -63,7 +63,7 @@ OANDA is unavailable (country restriction). Alternative brokers for API-based fo
   - Keep rolling window of last 200 candles in memory (enough for EMA/RSI warmup)
   - Fetch historical candles on startup for indicator warmup
 
-> **Broker note:** OANDA is unavailable (country restriction). Use MetaApi.cloud (wraps any MT4/MT5 broker) or an alternative broker with REST API support (Capital.com, FXCM, cTrader). The MarketDataService should be broker-agnostic — isolate broker-specific API calls behind an adapter interface so swapping brokers only changes one file.
+> **Broker note:** Capital.com is the active broker. The MarketDataService is broker-agnostic — isolate broker-specific API calls behind an adapter interface so swapping brokers only changes one file.
 
 ---
 
@@ -71,14 +71,14 @@ OANDA is unavailable (country restriction). Alternative brokers for API-based fo
 
 > Goal: Evaluate candles and produce validated trade signals.
 
-- [ ] **BaseStrategy** — `src/strategies/BaseStrategy.ts`
+- [x] **BaseStrategy** — `src/strategies/BaseStrategy.ts`
   - Abstract class with `evaluate(candles: Candle[]): Signal` method
   - `Signal` type: `{ action: 'BUY' | 'SELL' | 'HOLD', reason: string }`
-- [ ] **EMAScalpStrategy** — `src/strategies/EMAScalpStrategy.ts`
+- [x] **EMAScalpStrategy** — `src/strategies/EMAScalpStrategy.ts`
   - BUY: EMA(9) crosses above EMA(21) + RSI between 30–70
   - SELL: EMA(9) crosses below EMA(21) + RSI between 30–70
   - Log the signal reason for every decision (including HOLD)
-- [ ] **RiskManager** — `src/services/RiskManager.ts`
+- [x] **RiskManager** — `src/services/RiskManager.ts`
   - `calculatePositionSize(accountBalance, riskPercent, stopLossPips): number`
   - `canOpenTrade(currentPositions, dailyLoss, accountEquity): boolean`
   - Circuit breaker: halt all trading when daily loss limit hit
@@ -91,13 +91,13 @@ OANDA is unavailable (country restriction). Alternative brokers for API-based fo
 
 > Goal: Place real orders on broker and persist every trade to the database.
 
-- [ ] **OrderService** — `src/services/OrderService.ts`
+- [x] **OrderService** — `src/services/OrderService.ts`
   - `placeMarketOrder(symbol, side, quantity, stopLoss, takeProfit): Promise<Trade>`
   - `closePosition(positionId): Promise<void>`
   - `updateStopLoss(positionId, newSL): Promise<void>` (for trailing stops)
   - Retry logic: up to 3 attempts on transient network errors
   - Respect broker rate limits
-- [ ] **DatabaseService** — `src/services/DatabaseService.ts`
+- [x] **DatabaseService** — `src/services/DatabaseService.ts`
   - PostgreSQL connection via `pg`
   - Schema: `trades` table (id, symbol, side, entry_price, exit_price, sl, tp, quantity, pnl, status, opened_at, closed_at)
   - `saveTrade(trade: Trade): Promise<void>`
@@ -110,30 +110,37 @@ OANDA is unavailable (country restriction). Alternative brokers for API-based fo
 
 > Goal: Replace all mock data with live data from the backend.
 
-- [ ] **API server** in the backend (Express)
+- [x] **API server** in the backend (Express) — `src/services/ApiServer.ts`
   - `GET /api/status` — bot status, uptime, trades today
   - `GET /api/account` — balance, equity, margin, today's P&L
   - `GET /api/positions` — open positions
   - `GET /api/trades` — trade history with pagination
   - `GET /api/metrics` — win rate, profit factor, drawdown, Sharpe
-  - `GET /api/logs` — recent log entries
+  - `GET /api/logs` — recent log entries (in-memory circular buffer via `LogBuffer`)
+  - `GET /api/candles` — last N candles from MarketDataService
   - `GET /api/health` — system health (API connection, WS, DB, Redis, latency)
   - `POST /api/bot/start` — start the bot
   - `POST /api/bot/stop` — stop the bot
   - `POST /api/bot/pause` — pause the bot
-  - `PUT /api/strategy` — update strategy config
-- [ ] **WebSocket endpoint** on the backend for real-time push
+  - `PUT /api/strategy` — update strategy + risk config at runtime (re-instantiates strategy)
+- [x] **WebSocket endpoint** on the backend for real-time push (same HTTP server, `ws` upgrade)
   - Broadcast on every candle close: `{ type: 'candle', data: CandleData }`
   - Broadcast on trade open/close: `{ type: 'trade', data: Trade }`
-  - Broadcast on bot status change
-- [ ] **Frontend: replace mock data**
-  - Update `botStore.ts` to fetch from backend API via React Query
-  - Connect `LiveChart` to the WebSocket stream
-  - Connect `Logs` page to `GET /api/logs` (polling or WebSocket)
-  - Connect `Strategy` page `PUT /api/strategy` on save
-- [ ] **Bot entrypoint** — `src/bot.ts`
-  - Wire up all services into the main event loop
-  - On every `candle:close` event: run strategy → check risk → place order → persist
+- [x] **Frontend: replace mock data**
+  - `src/lib/api.ts` — typed fetch client for all endpoints
+  - `src/lib/useWebSocket.ts` — WS hook with exponential-backoff reconnect
+  - `botStore.ts` — stripped of mock data; Zustand holds UI state only
+  - `Dashboard.tsx` — React Query for account, status, positions, metrics
+  - `LiveChart.tsx` — initial candles from `GET /api/candles`, live updates via WebSocket
+  - `BotControlPanel.tsx` — `useMutation` for start / stop / pause
+  - `RecentTradesTable.tsx` — React Query `GET /api/trades`
+  - `Logs.tsx` — React Query for `GET /api/logs` + `GET /api/health` (polling)
+  - `Strategy.tsx` — loads config from `GET /api/strategy`, saves via `PUT /api/strategy`
+- [x] **Bot entrypoint** — `src/bot.ts`
+  - All services wired into the main event loop
+  - `botState` object shared with ApiServer for start/stop/pause control
+  - On every `candle:close` event: broadcasts candle → (if not paused) run strategy → check risk → place order → persist → broadcast trade
+  - `API_PORT` env var (default `3001`) controls which port ApiServer listens on
 
 ---
 
@@ -141,18 +148,19 @@ OANDA is unavailable (country restriction). Alternative brokers for API-based fo
 
 > Do not skip. Bugs here cost real money.
 
-- [ ] **Unit tests** for all pure functions
-  - EMA/RSI/MACD calculations (known input → known output)
-  - Position sizing calculations
-  - Risk manager circuit breaker logic
-- [ ] **Integration tests**
-  - MarketDataService reconnect behavior
-  - OrderService error handling and retries
-- [ ] **Backtesting**
-  - Download 6–12 months of 1-minute OHLCV data (Dukascopy or FXCM)
-  - Run EMAScalpStrategy against historical data
-  - Measure: win rate, profit factor, max drawdown, Sharpe ratio
-  - Iterate on strategy parameters before going to demo
+- [x] **Unit tests** for all pure functions
+  - EMA/RSI/MACD calculations (known input → known output) — 27 tests
+  - Position sizing calculations — covered in RiskManager tests
+  - Risk manager circuit breaker logic — covered in RiskManager tests
+- [x] **Integration tests**
+  - MarketDataService reconnect behavior — 12 tests (candle building + reconnect/backoff/fatal)
+  - OrderService error handling and retries — 18 tests (placeOrder, closePosition, updateSL, getPositions)
+- [x] **Backtesting** — `npm run backtest` (or `--candles N` / `--file data.csv`)
+  - Synthetic data mode built-in for immediate testing
+  - Supports real CSV data (Dukascopy/FXCM format: Date, Open, High, Low, Close, Volume)
+  - Reports: win rate, profit factor, max drawdown, Sharpe ratio, P&L, consecutive losses
+  - Verdict section flags strategy weaknesses before paper trading
+  - Download 6–12 months of real 1-minute OHLCV data and run: `npm run backtest -- --file data.csv`
 - [ ] **Paper trading on broker demo** — minimum 8 weeks
   - Track all metrics from `BotMetrics` interface
   - Compare live results to backtest expectations

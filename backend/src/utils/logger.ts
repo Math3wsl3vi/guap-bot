@@ -1,4 +1,5 @@
 import winston from 'winston';
+import { LogBufferTransport } from './LogBuffer';
 
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 
@@ -32,5 +33,6 @@ export const logger = winston.createLogger({
       maxsize: 10 * 1024 * 1024,
       maxFiles: 10,
     }),
+    new LogBufferTransport(),
   ],
 });

@@ -9,11 +9,52 @@ export interface TickData {
   timestamp: Date;
 }
 
+export interface PlaceOrderParams {
+  symbol: string;
+  direction: 'BUY' | 'SELL';
+  size: number;
+  /** Absolute price level for stop loss */
+  stopLevel?: number;
+  /** Absolute price level for take profit */
+  profitLevel?: number;
+}
+
+export interface PlaceOrderResult {
+  dealId: string;
+  executedPrice: number;
+  size: number;
+  direction: 'BUY' | 'SELL';
+  symbol: string;
+  openedAt: Date;
+}
+
+export interface AccountInfo {
+  balance: number;
+  equity: number;
+  margin: number;
+  currency: string;
+}
+
+export interface BrokerPosition {
+  dealId: string;
+  symbol: string;
+  direction: 'BUY' | 'SELL';
+  size: number;
+  entryLevel: number;
+  currentLevel: number;
+  stopLevel?: number;
+  profitLevel?: number;
+  pnl: number;
+  openedAt: Date;
+}
+
 /**
- * Broker-agnostic interface for market data access.
+ * Broker-agnostic interface for market data access and order execution.
  * Swap brokers by providing a different implementation — nothing else changes.
  */
 export interface IBrokerAdapter {
+  // ─── Connection ────────────────────────────────────────────────────────────
+
   /** Authenticate and open the WebSocket connection. */
   connect(): Promise<void>;
 
@@ -34,4 +75,30 @@ export interface IBrokerAdapter {
 
   /** True only when the WebSocket connection is open and authenticated. */
   isConnected(): boolean;
+
+  // ─── Account ───────────────────────────────────────────────────────────────
+
+  /** Fetch current account balance, equity, and margin. */
+  getAccountInfo(): Promise<AccountInfo>;
+
+  /** Fetch all currently open positions on the broker. */
+  getOpenPositions(): Promise<BrokerPosition[]>;
+
+  // ─── Orders ────────────────────────────────────────────────────────────────
+
+  /** Place a market order and return the broker-confirmed fill details. */
+  placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult>;
+
+  /**
+   * Close an open position by its broker deal ID.
+   * @param dealId  The broker's deal identifier returned when the order was placed.
+   */
+  closePosition(dealId: string): Promise<void>;
+
+  /**
+   * Update the stop-loss level on an open position (used for trailing stops).
+   * @param dealId     The broker's deal identifier.
+   * @param stopLevel  New absolute stop-loss price level.
+   */
+  updateStopLoss(dealId: string, stopLevel: number): Promise<void>;
 }

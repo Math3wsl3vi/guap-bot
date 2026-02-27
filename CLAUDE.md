@@ -202,10 +202,10 @@ const RISK_LIMITS = {
 ## Broker Selection Criteria
 
 ### Recommended Brokers for Scalping
-1. **OANDA** (Forex/Gold)
-   - Good API, TypeScript SDK available
-   - Low spreads, no commission
-   - Demo account for testing
+1. **Capital.com** (Forex/Gold) ← active broker
+   - REST + WebSocket API
+   - Low spreads, demo account available
+   - Wide country support
 
 2. **Interactive Brokers** (Forex/Stocks)
    - Professional-grade API
@@ -294,7 +294,7 @@ interface BotMetrics {
 
 ### Testing Data
 - Historical forex data: Dukascopy, FXCM
-- Paper trading: OANDA demo, MetaTrader demo
+- Paper trading: Capital.com demo, MetaTrader demo
 
 ### Community
 - r/algotrading (Reddit)
