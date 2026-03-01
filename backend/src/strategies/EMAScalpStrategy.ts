@@ -3,6 +3,7 @@ import { TechnicalIndicators } from '../indicators/TechnicalIndicators';
 import { strategyConfig } from '../config/strategy.config';
 import { logger } from '../utils/logger';
 import { BaseStrategy, Signal } from './BaseStrategy';
+import { StrategyType } from './StrategyType';
 
 const COMPONENT = 'EMAScalpStrategy';
 
@@ -24,7 +25,8 @@ function parseBlockedHours(ranges: string[]): BlockedRange[] {
 }
 
 export class EMAScalpStrategy extends BaseStrategy {
-  readonly name = 'EMAScalp';
+  readonly name = 'Conservative EMA Scalp';
+  readonly type: StrategyType = 'CONSERVATIVE';
 
   private readonly fastPeriod: number;
   private readonly slowPeriod: number;
@@ -208,6 +210,7 @@ export class EMAScalpStrategy extends BaseStrategy {
       reason: `EMA(${this.fastPeriod}) ${crossedAbove ? 'above' : 'below'} EMA(${this.slowPeriod}); RSI ${rsiCurr.toFixed(1)}; ADX ${adxCurr.toFixed(1)}${atrSuffix}`,
       stopLossPips,
       takeProfitPips,
+      strategyType: this.type,
     };
 
     logger.info(`Signal: ${direction} — ${signal.reason}`, {

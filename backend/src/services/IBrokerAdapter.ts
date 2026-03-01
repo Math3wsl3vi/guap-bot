@@ -48,6 +48,30 @@ export interface BrokerPosition {
   openedAt: Date;
 }
 
+export interface PlaceLimitOrderParams {
+  symbol: string;
+  direction: 'BUY' | 'SELL';
+  size: number;
+  /** Limit or stop price */
+  price: number;
+  /** Absolute price level for stop loss */
+  stopLevel?: number;
+  /** Absolute price level for take profit */
+  profitLevel?: number;
+}
+
+export interface BrokerOrder {
+  orderId: string;
+  symbol: string;
+  direction: 'BUY' | 'SELL';
+  type: 'LIMIT' | 'STOP';
+  size: number;
+  price: number;
+  stopLevel?: number;
+  profitLevel?: number;
+  openedAt: Date;
+}
+
 /**
  * Broker-agnostic interface for market data access and order execution.
  * Swap brokers by providing a different implementation — nothing else changes.
@@ -93,7 +117,7 @@ export interface IBrokerAdapter {
    * Close an open position by its broker deal ID.
    * @param dealId  The broker's deal identifier returned when the order was placed.
    */
-  closePosition(dealId: string): Promise<void>;
+  closePosition(dealId: string): Promise<{ pnl?: number }>;
 
   /**
    * Update the stop-loss level on an open position (used for trailing stops).
@@ -101,4 +125,18 @@ export interface IBrokerAdapter {
    * @param stopLevel  New absolute stop-loss price level.
    */
   updateStopLoss(dealId: string, stopLevel: number): Promise<void>;
+
+  // ─── Pending Orders (optional — only MT5 supports these) ─────────────────
+
+  /** Place a limit order (buy below / sell above current price). */
+  placeLimitOrder?(params: PlaceLimitOrderParams): Promise<PlaceOrderResult>;
+
+  /** Place a stop order (buy above / sell below current price). */
+  placeStopOrder?(params: PlaceLimitOrderParams): Promise<PlaceOrderResult>;
+
+  /** Cancel a pending order by its broker order ID. */
+  cancelOrder?(orderId: string): Promise<void>;
+
+  /** Fetch all pending (unfilled) orders on the broker. */
+  getOpenOrders?(): Promise<BrokerOrder[]>;
 }

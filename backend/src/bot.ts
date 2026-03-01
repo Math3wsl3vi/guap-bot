@@ -1,16 +1,18 @@
 import 'dotenv/config';
 import { logger } from './utils/logger';
-import { brokerConfig } from './config/broker.config';
+import { brokerConfig, getMT5Config } from './config/broker.config';
 import { strategyConfig } from './config/strategy.config';
 import { riskConfig } from './config/risk.config';
 import { getInstrumentConfig } from './config/instruments.config';
+import { IBrokerAdapter } from './services/IBrokerAdapter';
 import { DerivAdapter } from './services/DerivAdapter';
 import { MarketDataService } from './services/MarketDataService';
 import { OrderService } from './services/OrderService';
 import { DatabaseService } from './services/DatabaseService';
 import { RiskManager } from './services/RiskManager';
-import { ApiServer, BotState } from './services/ApiServer';
-import { EMAScalpStrategy } from './strategies/EMAScalpStrategy';
+import { ApiServer, ApiServerConfig, BotState } from './services/ApiServer';
+import { BaseStrategy, Signal, hasLifecycle, LifecycleStrategy } from './strategies/BaseStrategy';
+import { createStrategy } from './strategies/StrategyFactory';
 import { Candle } from './models/Candle';
 const API_PORT = parseInt(process.env.PORT ?? process.env.API_PORT ?? '3001');
 
@@ -24,12 +26,138 @@ const botState: BotState = {
 
 // ─── Strategy is re-created when config is updated via API ─────────────────────
 
-let strategy: EMAScalpStrategy = new EMAScalpStrategy();
+let strategy: BaseStrategy = createStrategy(strategyConfig.strategyType);
+
+// Assigned in main() — needed by recreateStrategy for grid shutdown.
+let orderService: OrderService;
 
 function recreateStrategy(): void {
-  strategy = new EMAScalpStrategy();
-  logger.info('EMAScalpStrategy re-instantiated with updated config', { component: 'Bot' });
+  // If old strategy is a grid, shut it down and cancel pending orders
+  if (hasLifecycle(strategy) && strategy.isGridInitialized()) {
+    const shutdownSignal = strategy.shutdown();
+    if (shutdownSignal.cancelOrderIds?.length && orderService) {
+      cancelGridOrders(shutdownSignal.cancelOrderIds).catch((err) =>
+        logger.error('Error cancelling grid orders during strategy switch', {
+          component: 'Bot',
+          error: (err as Error).message,
+        }),
+      );
+    }
+  }
+  strategy = createStrategy(strategyConfig.strategyType);
+  logger.info(`Strategy re-instantiated: ${strategy.name} (${strategy.type})`, { component: 'Bot' });
 }
+
+/** Returns the active strategy instance (used by ApiServer for grid state). */
+function getStrategy(): BaseStrategy {
+  return strategy;
+}
+
+// ─── Grid trading helpers ─────────────────────────────────────────────────────
+
+async function cancelGridOrders(orderIds: string[]): Promise<void> {
+  for (const id of orderIds) {
+    try {
+      await orderService.cancelOrder(id);
+    } catch (err) {
+      logger.warn(`Failed to cancel grid order ${id}`, {
+        component: 'Bot',
+        error: (err as Error).message,
+      });
+    }
+  }
+}
+
+async function handleGridSignal(
+  signal: Signal,
+  svc: OrderService,
+  server: ApiServer,
+): Promise<void> {
+  const gridStrategy = strategy as BaseStrategy & LifecycleStrategy;
+
+  // 1. Cancel orders if requested (REBALANCE or SHUTDOWN)
+  if (signal.cancelOrderIds?.length) {
+    for (const orderId of signal.cancelOrderIds) {
+      try {
+        await svc.cancelOrder(orderId);
+      } catch (err) {
+        logger.warn(`Failed to cancel grid order ${orderId}`, {
+          component: 'Bot',
+          error: (err as Error).message,
+        });
+      }
+    }
+    gridStrategy.confirmOrdersCancelled(signal.cancelOrderIds);
+  }
+
+  // 2. Place new orders if requested (INIT or REBALANCE)
+  if (signal.gridOrders?.length) {
+    for (const gridOrder of signal.gridOrders) {
+      try {
+        const brokerOrder = await svc.placeLimitOrder({
+          symbol: gridOrder.symbol,
+          direction: gridOrder.direction,
+          size: gridOrder.size,
+          price: gridOrder.price,
+          profitLevel: gridOrder.profitLevel,
+        });
+        gridStrategy.confirmOrderPlaced(
+          gridOrder.price,
+          gridOrder.direction,
+          brokerOrder.orderId,
+        );
+        logger.info('Grid order placed', {
+          component: 'Bot',
+          orderId: brokerOrder.orderId,
+          direction: gridOrder.direction,
+          price: gridOrder.price,
+          tp: gridOrder.profitLevel,
+        });
+      } catch (err) {
+        logger.error('Failed to place grid order', {
+          component: 'Bot',
+          direction: gridOrder.direction,
+          price: gridOrder.price,
+          error: (err as Error).message,
+        });
+      }
+    }
+  }
+
+  // 3. Broadcast grid state update
+  server.broadcast({
+    type: 'grid_update',
+    data: {
+      action: signal.gridAction,
+      reason: signal.reason,
+      orderCount: signal.gridOrders?.length ?? 0,
+      cancelledCount: signal.cancelOrderIds?.length ?? 0,
+    },
+  });
+}
+
+// ─── Broker factory ──────────────────────────────────────────────────────────
+
+function createBrokerAdapter(): IBrokerAdapter {
+  if (strategyConfig.broker === 'mt5') {
+    // MT5Adapter requires metaapi.cloud-sdk — see docs/MT5Implementation.md Phase 1
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { MT5Adapter } = require('./services/MT5Adapter') as {
+      MT5Adapter: new (cfg: { metaApiToken: string; accountId: string }) => IBrokerAdapter;
+    };
+    const mt5Cfg = getMT5Config();
+    return new MT5Adapter(mt5Cfg);
+  }
+
+  return new DerivAdapter({
+    appId: brokerConfig.appId,
+    apiToken: brokerConfig.apiToken,
+    isDemo: brokerConfig.isDemo,
+    multiplier: brokerConfig.multiplier,
+  });
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
   logger.info('=== GUAP-BOT Starting ===', { component: 'Bot' });
@@ -61,17 +189,12 @@ async function main(): Promise<void> {
     logger.warn('*** LIVE TRADING MODE ENABLED ***', { component: 'Bot' });
   }
 
-  // ─── Services ──────────────────────────────────────────────────────────────
+  // ─── Services (mutable — broker switch replaces adapter + dependents) ──────
 
-  const adapter = new DerivAdapter({
-    appId:      brokerConfig.appId,
-    apiToken:   brokerConfig.apiToken,
-    isDemo:     brokerConfig.isDemo,
-    multiplier: brokerConfig.multiplier,
-  });
-
-  const marketData = new MarketDataService(adapter);
-  const orderService = new OrderService(adapter);
+  let adapter: IBrokerAdapter = createBrokerAdapter();
+  let marketData = new MarketDataService(adapter);
+  let orderServiceLocal = new OrderService(adapter);
+  orderService = orderServiceLocal;
   const dbService = new DatabaseService();
 
   // ─── Database init ──────────────────────────────────────────────────────────
@@ -90,15 +213,16 @@ async function main(): Promise<void> {
     currency: accountOnStart.currency,
   });
 
-  // ─── API server ─────────────────────────────────────────────────────────────
+  // ─── API server config (mutable — broker switch updates adapter/services) ──
 
-  const apiServer = new ApiServer({
+  const apiConfig: ApiServerConfig = {
     adapter,
     marketData,
-    orderService,
+    orderService: orderServiceLocal,
     dbService,
     riskManager,
     botState,
+    getStrategy,
     onStart: async () => {
       await marketData.start();
       botState.isRunning = true;
@@ -117,13 +241,56 @@ async function main(): Promise<void> {
       });
     },
     onStrategyUpdate: recreateStrategy,
-  });
 
+    onBrokerSwitch: async () => {
+      const wasRunning = botState.isRunning;
+
+      // 1. Stop market data & disconnect old adapter
+      await marketData.stop();
+
+      // 2. Create and connect new adapter
+      adapter = createBrokerAdapter();
+      await adapter.connect();
+
+      const account = await adapter.getAccountInfo();
+      riskManager.resetDailyLoss();
+
+      logger.info('New broker adapter connected', {
+        component: 'Bot',
+        broker: strategyConfig.broker,
+        balance: account.balance,
+        equity: account.equity,
+      });
+
+      // 3. Create new services
+      marketData = new MarketDataService(adapter);
+      orderServiceLocal = new OrderService(adapter);
+      orderService = orderServiceLocal;
+
+      // 4. Update config so ApiServer route handlers see new references
+      apiConfig.adapter = adapter;
+      apiConfig.marketData = marketData;
+      apiConfig.orderService = orderServiceLocal;
+
+      // 5. Re-attach event listeners to new MarketDataService
+      attachListeners(marketData);
+
+      // 6. Restart market data pipeline if bot was running
+      if (wasRunning) {
+        await marketData.start();
+        botState.isRunning = true;
+        botState.startedAt = new Date();
+      }
+    },
+  };
+
+  const apiServer = new ApiServer(apiConfig);
   apiServer.start(API_PORT);
 
-  // ─── Main event loop ────────────────────────────────────────────────────────
+  // ─── Event listeners (extracted so they can be re-attached after broker switch)
 
-  marketData.on('candle:close', async (candle: Candle) => {
+  function attachListeners(md: MarketDataService): void {
+  md.on('candle:close', async (candle: Candle) => {
     // Broadcast the closed candle to all WebSocket clients
     apiServer.broadcast({
       type: 'candle',
@@ -140,7 +307,81 @@ async function main(): Promise<void> {
     // Don't execute trades while paused
     if (botState.isPaused) return;
 
-    const candles = marketData.getCandles();
+    const candles = md.getCandles();
+
+    // ── Grid strategy: lifecycle management ─────────────────────────────────
+    if (hasLifecycle(strategy)) {
+      try {
+        // Initialize grid on first candle after strategy creation
+        if (!strategy.isGridInitialized()) {
+          const initSignal = strategy.initialize(candle.close);
+          logger.info('Grid strategy initializing', {
+            component: 'Bot',
+            reason: initSignal.reason,
+            orderCount: initSignal.gridOrders?.length ?? 0,
+          });
+          await handleGridSignal(initSignal, orderService, apiServer);
+          return;
+        }
+
+        // Detect filled orders by polling broker open orders
+        const openOrders = await orderService.getOpenOrders();
+        const openOrderIds = new Set(openOrders.map((o) => o.orderId));
+        const gridState = (strategy as BaseStrategy & LifecycleStrategy & { getState(): { levels: Array<{ orderId: string | null; status: string }> } }).getState();
+
+        for (const level of gridState.levels) {
+          if (level.orderId && level.status === 'PENDING' && !openOrderIds.has(level.orderId)) {
+            strategy.confirmOrderFilled(level.orderId);
+            logger.info('Grid order filled (detected via polling)', {
+              component: 'Bot',
+              orderId: level.orderId,
+            });
+          }
+        }
+
+        // Drawdown safety check for grid
+        const account = await adapter.getAccountInfo();
+        const riskState = riskManager.getState();
+        if (riskState.peakEquity > 0) {
+          const drawdown = (riskState.peakEquity - account.equity) / riskState.peakEquity;
+          if (drawdown >= strategyConfig.gridTrading.maxGridDrawdown) {
+            const shutdownSignal = strategy.shutdown();
+            shutdownSignal.reason = `Grid drawdown limit hit: ${(drawdown * 100).toFixed(2)}% >= ${(strategyConfig.gridTrading.maxGridDrawdown * 100).toFixed(1)}%`;
+            await handleGridSignal(shutdownSignal, orderService, apiServer);
+            logger.error('Grid shut down due to max drawdown', { component: 'Bot', drawdown });
+            return;
+          }
+        }
+
+        // Evaluate grid health (ADX, rebalance)
+        const signal = strategy.evaluate(candles);
+        logger.info('Grid candle evaluated', {
+          component: 'Bot',
+          close: candle.close,
+          gridAction: signal.gridAction,
+          reason: signal.reason,
+        });
+
+        if (signal.gridAction && signal.gridAction !== 'MONITOR') {
+          await handleGridSignal(signal, orderService, apiServer);
+          if (signal.gridAction === 'SHUTDOWN') {
+            logger.warn('Grid strategy shut down — safety trigger', {
+              component: 'Bot',
+              reason: signal.reason,
+            });
+          }
+        }
+      } catch (err) {
+        logger.error('Error in grid trading loop', {
+          component: 'Bot',
+          error: (err as Error).message,
+          stack: (err as Error).stack,
+        });
+      }
+      return; // Grid strategies handle their own order flow — skip scalar path
+    }
+
+    // ── Scalar strategy: standard BUY/SELL/HOLD flow ────────────────────────
 
     // 1. Evaluate strategy
     const signal = strategy.evaluate(candles);
@@ -172,12 +413,28 @@ async function main(): Promise<void> {
         return;
       }
 
-      // 5. Position sizing — use ATR-based SL if the strategy provided it
-      const effectiveSlPips = signal.stopLossPips ?? strategyConfig.stopLossPips;
-      const effectiveTpPips = signal.takeProfitPips ?? strategyConfig.takeProfitPips;
-
+      // 5a. Spread filter — skip if spread is too wide
+      const lastTick = md.getLastTick();
       const instrument = getInstrumentConfig(strategyConfig.symbol);
       const pipSize = instrument.pipSize;
+
+      if (lastTick && lastTick.ask > 0 && lastTick.bid > 0) {
+        const spreadPips = (lastTick.ask - lastTick.bid) / pipSize;
+        if (spreadPips > strategyConfig.spreadFilterPips) {
+          logger.info('Trade skipped — spread too wide', {
+            component: 'Bot',
+            spreadPips: spreadPips.toFixed(1),
+            maxSpreadPips: strategyConfig.spreadFilterPips,
+            bid: lastTick.bid,
+            ask: lastTick.ask,
+          });
+          return;
+        }
+      }
+
+      // 5b. Position sizing — use ATR-based SL if the strategy provided it
+      const effectiveSlPips = signal.stopLossPips ?? strategyConfig.stopLossPips;
+      const effectiveTpPips = signal.takeProfitPips ?? strategyConfig.takeProfitPips;
       const minPositionSize = Math.max(instrument.minPositionSize, riskConfig.minPositionSize);
 
       const size = riskManager.calculatePositionSize(
@@ -246,13 +503,16 @@ async function main(): Promise<void> {
     }
   });
 
-  marketData.on('fatal', (err: Error) => {
+  md.on('fatal', (err: Error) => {
     logger.error('Fatal market data error — shutting down', {
       component: 'Bot',
       error: err.message,
     });
     process.exit(1);
   });
+  } // end attachListeners
+
+  attachListeners(marketData);
 
   // ─── Daily loss reset at midnight UTC ─────────────────────────────────────
 
@@ -268,9 +528,18 @@ async function main(): Promise<void> {
 
   // ─── Graceful shutdown ─────────────────────────────────────────────────────
 
-  const shutdown = async (signal: string) => {
-    logger.info(`${signal} received — shutting down`, { component: 'Bot' });
+  const shutdown = async (sig: string) => {
+    logger.info(`${sig} received — shutting down`, { component: 'Bot' });
     botState.isRunning = false;
+
+    // Cancel any active grid orders before disconnecting
+    if (hasLifecycle(strategy) && strategy.isGridInitialized()) {
+      const shutdownSignal = strategy.shutdown();
+      if (shutdownSignal.cancelOrderIds?.length) {
+        await cancelGridOrders(shutdownSignal.cancelOrderIds);
+      }
+    }
+
     await marketData.stop();
     await apiServer.close();
     await dbService.disconnect();

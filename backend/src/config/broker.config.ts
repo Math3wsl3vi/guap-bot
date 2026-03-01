@@ -22,3 +22,21 @@ export const brokerConfig: Readonly<BrokerConfig> = Object.freeze({
   isDemo:     process.env.DERIV_IS_DEMO !== 'false',
   multiplier: parseInt(process.env.DERIV_MULTIPLIER ?? '100', 10),
 });
+
+// ─── MT5 via MetaApi ──────────────────────────────────────────────────────────
+
+export interface MT5Config {
+  metaApiToken: string;
+  accountId: string;
+}
+
+/**
+ * Lazy MT5 config — only validates env vars when called (i.e. when BROKER=mt5).
+ * This avoids requiring METAAPI_TOKEN / MT5_ACCOUNT_ID when using the Deriv adapter.
+ */
+export function getMT5Config(): MT5Config {
+  return {
+    metaApiToken: requireEnv('METAAPI_TOKEN'),
+    accountId: requireEnv('MT5_ACCOUNT_ID'),
+  };
+}

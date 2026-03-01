@@ -12,6 +12,8 @@ import { riskConfig } from '../config/risk.config';
 import { INSTRUMENTS, getInstrumentConfig } from '../config/instruments.config';
 import { getLogBuffer } from '../utils/LogBuffer';
 import { logger } from '../utils/logger';
+import { BaseStrategy, hasLifecycle } from '../strategies/BaseStrategy';
+import { GridTradingStrategy } from '../strategies/GridTradingStrategy';
 
 export interface BotState {
   isRunning: boolean;
@@ -26,10 +28,13 @@ export interface ApiServerConfig {
   dbService: DatabaseService;
   riskManager: RiskManager;
   botState: BotState;
+  getStrategy: () => BaseStrategy;
   onStart: () => Promise<void>;
   onStop: () => Promise<void>;
   onPause: () => void;
   onStrategyUpdate: () => void;
+  /** Full reconnect cycle: disconnect old adapter → create new → connect → rebuild services. */
+  onBrokerSwitch: () => Promise<void>;
 }
 
 export class ApiServer {
@@ -70,7 +75,9 @@ export class ApiServer {
   // ─── REST Routes ────────────────────────────────────────────────────────────
 
   private setupRoutes(): void {
-    const { adapter, marketData, orderService, dbService, riskManager, botState } = this.cfg;
+    // adapter, marketData, orderService are NOT destructured here — they are
+    // accessed via this.cfg.* so broker switching can swap them at runtime.
+    const { dbService, riskManager, botState } = this.cfg;
 
     // ── GET /api/status ────────────────────────────────────────────────────────
     this.app.get('/api/status', async (_req: Request, res: Response) => {
@@ -101,7 +108,7 @@ export class ApiServer {
     // ── GET /api/account ────────────────────────────────────────────────────────
     this.app.get('/api/account', async (_req: Request, res: Response) => {
       try {
-        const account = await adapter.getAccountInfo();
+        const account = await this.cfg.adapter.getAccountInfo();
 
         const allTrades = await dbService.getTradeHistory(1000);
         const dayStart = new Date();
@@ -132,7 +139,7 @@ export class ApiServer {
     // ── GET /api/positions ───────────────────────────────────────────────────────
     this.app.get('/api/positions', async (_req: Request, res: Response) => {
       try {
-        const positions = await orderService.getOpenPositions();
+        const positions = await this.cfg.orderService.getOpenPositions();
         // Map Position → frontend Trade shape so field names align
         res.json(
           positions.map((p) => ({
@@ -162,7 +169,7 @@ export class ApiServer {
         const positionId = req.params.id;
 
         // Get live positions to find current price
-        const livePositions = await orderService.getOpenPositions();
+        const livePositions = await this.cfg.orderService.getOpenPositions();
         const position = livePositions.find((p) => p.id === positionId);
         if (!position) {
           res.status(404).json({ error: 'Position not found' });
@@ -177,7 +184,7 @@ export class ApiServer {
           return;
         }
 
-        const update = await orderService.closePosition(positionId, position.currentPrice, trade);
+        const update = await this.cfg.orderService.closePosition(positionId, position.currentPrice, trade);
         await dbService.updateTrade(trade.id, update);
 
         logger.info('Position closed via API', { component: 'ApiServer', positionId });
@@ -246,7 +253,7 @@ export class ApiServer {
     this.app.get('/api/candles', (req: Request, res: Response) => {
       try {
         const limit = Math.min(parseInt(String(req.query.limit ?? '60')), 200);
-        const candles = marketData.getCandles();
+        const candles = this.cfg.marketData.getCandles();
         res.json(
           candles.slice(-limit).map((c) => ({
             time: c.timestamp instanceof Date ? c.timestamp.toISOString() : c.timestamp,
@@ -285,15 +292,15 @@ export class ApiServer {
         let latency = -1;
         try {
           const t0 = Date.now();
-          await adapter.getAccountInfo();
+          await this.cfg.adapter.getAccountInfo();
           latency = Date.now() - t0;
         } catch {
           // broker unreachable
         }
 
         res.json({
-          apiConnection: adapter.isConnected(),
-          webSocket: adapter.isConnected(),
+          apiConnection: this.cfg.adapter.isConnected(),
+          webSocket: this.cfg.adapter.isConnected(),
           database: true,
           redis: false,
           latency,
@@ -319,9 +326,39 @@ export class ApiServer {
       );
     });
 
+    // ── GET /api/grid ───────────────────────────────────────────────────────────────
+    this.app.get('/api/grid', (_req: Request, res: Response) => {
+      try {
+        const strat = this.cfg.getStrategy();
+        if (!hasLifecycle(strat) || !strat.isGridInitialized()) {
+          res.json({ active: false });
+          return;
+        }
+        const gridState = (strat as GridTradingStrategy).getState();
+        const pendingCount = gridState.levels.filter((l) => l.status === 'PENDING').length;
+        const filledCount = gridState.levels.filter((l) => l.status === 'FILLED').length;
+        const cancelledCount = gridState.levels.filter((l) => l.status === 'CANCELLED').length;
+
+        res.json({
+          active: true,
+          centerPrice: gridState.centerPrice,
+          totalLevels: gridState.levels.length,
+          pendingCount,
+          filledCount,
+          cancelledCount,
+          levels: gridState.levels,
+          config: strategyConfig.gridTrading,
+        });
+      } catch (err) {
+        res.status(500).json({ error: (err as Error).message });
+      }
+    });
+
     // ── GET /api/strategy ─────────────────────────────────────────────────────────
     this.app.get('/api/strategy', (_req: Request, res: Response) => {
       res.json({
+        strategyType: strategyConfig.strategyType,
+        broker: strategyConfig.broker,
         symbol: strategyConfig.symbol,
         emaFast: strategyConfig.emaFastPeriod,
         emaSlow: strategyConfig.emaSlowPeriod,
@@ -341,6 +378,7 @@ export class ApiServer {
         tradingHoursStart: strategyConfig.tradingHoursStart,
         tradingHoursEnd: strategyConfig.tradingHoursEnd,
         timezone: strategyConfig.timezone,
+        gridTrading: strategyConfig.gridTrading,
       });
     });
 
@@ -348,6 +386,9 @@ export class ApiServer {
     this.app.put('/api/strategy', async (req: Request, res: Response) => {
       try {
         const b = req.body as Record<string, unknown>;
+
+        // Capture broker change intent before applying any config updates
+        const brokerChanged = b.broker != null && String(b.broker) !== strategyConfig.broker;
 
         // Symbol change — stop market data, swap symbol + instrument params, restart
         if (b.symbol != null && String(b.symbol) !== strategyConfig.symbol) {
@@ -388,11 +429,40 @@ export class ApiServer {
         if (b.tradingHoursEnd != null) strategyConfig.tradingHoursEnd = String(b.tradingHoursEnd);
         if (b.timezone != null) strategyConfig.timezone = String(b.timezone);
 
+        // Strategy type change
+        if (b.strategyType != null) {
+          strategyConfig.strategyType = String(b.strategyType) as typeof strategyConfig.strategyType;
+        }
+        if (b.broker != null) {
+          strategyConfig.broker = String(b.broker) as typeof strategyConfig.broker;
+        }
+
+        // Grid trading config updates
+        if (b.gridTrading != null && typeof b.gridTrading === 'object') {
+          const g = b.gridTrading as Record<string, unknown>;
+          if (g.gridLevels != null) strategyConfig.gridTrading.gridLevels = Number(g.gridLevels);
+          if (g.gridSpacing != null) strategyConfig.gridTrading.gridSpacing = Number(g.gridSpacing);
+          if (g.lotSizePerLevel != null) strategyConfig.gridTrading.lotSizePerLevel = Number(g.lotSizePerLevel);
+          if (g.takeProfitPerLevel != null) strategyConfig.gridTrading.takeProfitPerLevel = Number(g.takeProfitPerLevel);
+          if (g.maxGridDrawdown != null) strategyConfig.gridTrading.maxGridDrawdown = Number(g.maxGridDrawdown);
+          if (g.trendDetectionEnabled != null) strategyConfig.gridTrading.trendDetectionEnabled = Boolean(g.trendDetectionEnabled);
+          if (g.trendAdxThreshold != null) strategyConfig.gridTrading.trendAdxThreshold = Number(g.trendAdxThreshold);
+        }
+
         // Risk config updates (frontend sends them as %)
         if (b.riskPerTrade != null) riskConfig.maxRiskPerTrade = Number(b.riskPerTrade) / 100;
         if (b.maxPositions != null) riskConfig.maxOpenPositions = Number(b.maxPositions);
         if (b.dailyLossLimit != null) riskConfig.maxDailyLoss = Number(b.dailyLossLimit) / 100;
         if (b.maxDrawdown != null) riskConfig.maxDrawdown = Number(b.maxDrawdown) / 100;
+
+        // Broker switch — full reconnect cycle (disconnect old → create new → connect → rebuild)
+        if (brokerChanged) {
+          await this.cfg.onBrokerSwitch();
+          logger.info('Broker switched via API', {
+            component: 'ApiServer',
+            broker: strategyConfig.broker,
+          });
+        }
 
         // Re-instantiate strategy so new EMA/RSI periods take effect immediately
         this.cfg.onStrategyUpdate();

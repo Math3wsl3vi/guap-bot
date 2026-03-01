@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { IBrokerAdapter, BrokerPosition } from './IBrokerAdapter';
+import { IBrokerAdapter, BrokerPosition, BrokerOrder, PlaceLimitOrderParams } from './IBrokerAdapter';
 import { Trade } from '../models/Trade';
 import { Position } from '../models/Position';
 import { logger } from '../utils/logger';
@@ -125,15 +125,17 @@ export class OrderService {
   async closePosition(positionId: string, exitPrice: number, openTrade: Trade): Promise<Partial<Trade>> {
     logger.info('Closing position', { component: COMPONENT, positionId });
 
-    await withRetry(
+    const closeResult = await withRetry(
       () => this.adapter.closePosition(positionId),
       'closePosition',
     );
 
-    const pnlRaw =
-      openTrade.type === 'BUY'
+    // Prefer broker-reported P&L (accurate for multiplier contracts).
+    // Fall back to spot formula for adapters that don't provide it.
+    const pnlRaw = closeResult.pnl ??
+      (openTrade.type === 'BUY'
         ? (exitPrice - openTrade.entryPrice) * openTrade.quantity
-        : (openTrade.entryPrice - exitPrice) * openTrade.quantity;
+        : (openTrade.entryPrice - exitPrice) * openTrade.quantity);
 
     const profitLossPercent =
       openTrade.entryPrice > 0
@@ -171,6 +173,139 @@ export class OrderService {
     await withRetry(
       () => this.adapter.updateStopLoss(positionId, newSL),
       'updateStopLoss',
+    );
+  }
+
+  // ─── Pending / Grid Orders ──────────────────────────────────────────────
+
+  /**
+   * Place a limit order on the broker (requires MT5 adapter).
+   * Returns the broker-confirmed order details.
+   */
+  async placeLimitOrder(params: PlaceLimitOrderParams): Promise<BrokerOrder> {
+    if (!this.adapter.placeLimitOrder) {
+      throw new Error('Current broker does not support limit orders. Switch to MT5 for grid trading.');
+    }
+
+    logger.info('Placing limit order', {
+      component: COMPONENT,
+      symbol: params.symbol,
+      direction: params.direction,
+      size: params.size,
+      price: params.price,
+    });
+
+    const result = await withRetry(
+      () => this.adapter.placeLimitOrder!(params),
+      'placeLimitOrder',
+    );
+
+    const order: BrokerOrder = {
+      orderId: result.dealId,
+      symbol: params.symbol,
+      direction: params.direction,
+      type: 'LIMIT',
+      size: params.size,
+      price: params.price,
+      stopLevel: params.stopLevel,
+      profitLevel: params.profitLevel,
+      openedAt: result.openedAt,
+    };
+
+    logger.info('Limit order placed', {
+      component: COMPONENT,
+      orderId: order.orderId,
+      direction: params.direction,
+      price: params.price,
+    });
+
+    return order;
+  }
+
+  /**
+   * Place a stop order on the broker (requires MT5 adapter).
+   */
+  async placeStopOrder(params: PlaceLimitOrderParams): Promise<BrokerOrder> {
+    if (!this.adapter.placeStopOrder) {
+      throw new Error('Current broker does not support stop orders. Switch to MT5 for grid trading.');
+    }
+
+    logger.info('Placing stop order', {
+      component: COMPONENT,
+      symbol: params.symbol,
+      direction: params.direction,
+      size: params.size,
+      price: params.price,
+    });
+
+    const result = await withRetry(
+      () => this.adapter.placeStopOrder!(params),
+      'placeStopOrder',
+    );
+
+    const order: BrokerOrder = {
+      orderId: result.dealId,
+      symbol: params.symbol,
+      direction: params.direction,
+      type: 'STOP',
+      size: params.size,
+      price: params.price,
+      stopLevel: params.stopLevel,
+      profitLevel: params.profitLevel,
+      openedAt: result.openedAt,
+    };
+
+    logger.info('Stop order placed', {
+      component: COMPONENT,
+      orderId: order.orderId,
+      direction: params.direction,
+      price: params.price,
+    });
+
+    return order;
+  }
+
+  /**
+   * Cancel a pending order by its broker order ID.
+   */
+  async cancelOrder(orderId: string): Promise<void> {
+    if (!this.adapter.cancelOrder) {
+      throw new Error('Current broker does not support pending orders.');
+    }
+
+    logger.info('Cancelling order', { component: COMPONENT, orderId });
+
+    await withRetry(
+      () => this.adapter.cancelOrder!(orderId),
+      'cancelOrder',
+    );
+
+    logger.info('Order cancelled', { component: COMPONENT, orderId });
+  }
+
+  /**
+   * Cancel all pending orders. Returns the count of orders cancelled.
+   */
+  async cancelAllOrders(): Promise<number> {
+    const orders = await this.getOpenOrders();
+    for (const order of orders) {
+      await this.cancelOrder(order.orderId);
+    }
+    logger.info('All pending orders cancelled', { component: COMPONENT, count: orders.length });
+    return orders.length;
+  }
+
+  /**
+   * Fetch all pending (unfilled) orders from the broker.
+   */
+  async getOpenOrders(): Promise<BrokerOrder[]> {
+    if (!this.adapter.getOpenOrders) {
+      return [];
+    }
+
+    return withRetry(
+      () => this.adapter.getOpenOrders!(),
+      'getOpenOrders',
     );
   }
 

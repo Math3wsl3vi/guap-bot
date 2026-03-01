@@ -173,7 +173,7 @@ describe('OrderService.closePosition', () => {
 
   it('returns CLOSED status', async () => {
     const adapter = makeMockAdapter();
-    adapter.closePosition.mockResolvedValue(undefined);
+    adapter.closePosition.mockResolvedValue({});
     const svc = new OrderService(adapter);
 
     const update = await svc.closePosition('deal-123', 2010, OPEN_TRADE);
@@ -182,7 +182,7 @@ describe('OrderService.closePosition', () => {
 
   it('calculates positive P&L for a winning BUY trade', async () => {
     const adapter = makeMockAdapter();
-    adapter.closePosition.mockResolvedValue(undefined);
+    adapter.closePosition.mockResolvedValue({});
     const svc = new OrderService(adapter);
 
     // BUY at 2000, exit at 2010: pnl = (2010 - 2000) * 100 = 1000
@@ -193,7 +193,7 @@ describe('OrderService.closePosition', () => {
 
   it('calculates negative P&L for a losing BUY trade', async () => {
     const adapter = makeMockAdapter();
-    adapter.closePosition.mockResolvedValue(undefined);
+    adapter.closePosition.mockResolvedValue({});
     const svc = new OrderService(adapter);
 
     // BUY at 2000, exit at 1995: pnl = (1995 - 2000) * 100 = -500
@@ -204,7 +204,7 @@ describe('OrderService.closePosition', () => {
 
   it('calculates positive P&L for a winning SELL trade', async () => {
     const adapter = makeMockAdapter();
-    adapter.closePosition.mockResolvedValue(undefined);
+    adapter.closePosition.mockResolvedValue({});
     const svc = new OrderService(adapter);
 
     const sellTrade: Trade = { ...OPEN_TRADE, type: 'SELL' };
@@ -215,7 +215,7 @@ describe('OrderService.closePosition', () => {
 
   it('calculates negative P&L for a losing SELL trade', async () => {
     const adapter = makeMockAdapter();
-    adapter.closePosition.mockResolvedValue(undefined);
+    adapter.closePosition.mockResolvedValue({});
     const svc = new OrderService(adapter);
 
     const sellTrade: Trade = { ...OPEN_TRADE, type: 'SELL' };
@@ -226,7 +226,7 @@ describe('OrderService.closePosition', () => {
 
   it('sets closedAt to the current time', async () => {
     const adapter = makeMockAdapter();
-    adapter.closePosition.mockResolvedValue(undefined);
+    adapter.closePosition.mockResolvedValue({});
     const svc = new OrderService(adapter);
 
     const before = Date.now();
@@ -240,7 +240,7 @@ describe('OrderService.closePosition', () => {
 
   it('sets the exit price on the update', async () => {
     const adapter = makeMockAdapter();
-    adapter.closePosition.mockResolvedValue(undefined);
+    adapter.closePosition.mockResolvedValue({});
     const svc = new OrderService(adapter);
 
     const update = await svc.closePosition('deal-123', 2010, OPEN_TRADE);
@@ -251,7 +251,7 @@ describe('OrderService.closePosition', () => {
     const adapter = makeMockAdapter();
     adapter.closePosition
       .mockRejectedValueOnce(new Error('ECONNRESET'))
-      .mockResolvedValue(undefined);
+      .mockResolvedValue({});
     const svc = new OrderService(adapter);
 
     const update = await svc.closePosition('deal-123', 2010, OPEN_TRADE);

@@ -38,6 +38,7 @@ export class MarketDataService extends EventEmitter {
   private readonly adapter: IBrokerAdapter;
   private candles: Candle[] = [];
   private currentBar: CandleBuilder | null = null;
+  private lastTick: TickData | null = null;
   private reconnectAttempts = 0;
   private readonly maxReconnectAttempts = 10;
   private reconnectTimer: NodeJS.Timeout | null = null;
@@ -68,6 +69,11 @@ export class MarketDataService extends EventEmitter {
   /** Returns a snapshot of the current rolling candle window (oldest → newest). */
   getCandles(): Readonly<Candle[]> {
     return this.candles;
+  }
+
+  /** Returns the most recent tick (bid/ask/mid) for spread checking. */
+  getLastTick(): TickData | null {
+    return this.lastTick;
   }
 
   // ─── Private: connection ─────────────────────────────────────────────────
@@ -149,6 +155,8 @@ export class MarketDataService extends EventEmitter {
   // ─── Private: tick processing ────────────────────────────────────────────
 
   private onTick(tick: TickData): void {
+    this.lastTick = tick;
+
     // Floor the tick timestamp to the nearest minute
     const minuteTs = Math.floor(tick.timestamp.getTime() / 60_000) * 60_000;
 

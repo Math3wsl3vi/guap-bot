@@ -62,7 +62,7 @@ const Strategy = () => {
   return (
     <div className="space-y-6 max-w-4xl">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold text-foreground">Strategy Configuration</h1>
+        <h1 className="md:text-xl  font-bold text-foreground">Strategy Configuration</h1>
         <div className="flex gap-2">
           <Button variant="secondary" onClick={handleReset} className="gap-2">
             <RotateCcw className="w-4 h-4" /> Reset

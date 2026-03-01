@@ -254,7 +254,7 @@ export class CapitalComAdapter implements IBrokerAdapter {
     };
   }
 
-  async closePosition(dealId: string): Promise<void> {
+  async closePosition(dealId: string): Promise<{ pnl?: number }> {
     if (!this.session) throw new Error('Not authenticated');
 
     await this.http.delete(`/positions/${dealId}`, {
@@ -262,6 +262,7 @@ export class CapitalComAdapter implements IBrokerAdapter {
     });
 
     logger.info('Position closed', { component: 'CapitalComAdapter', dealId });
+    return {};
   }
 
   async updateStopLoss(dealId: string, stopLevel: number): Promise<void> {

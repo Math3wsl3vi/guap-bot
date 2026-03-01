@@ -53,8 +53,8 @@ const Dashboard = () => {
   const profitFactor = metrics?.profitFactor ?? 0;
 
   return (
-    <div className="space-y-6">
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+    <div className="space-y-4 md:space-y-6">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 md:gap-4">
         <StatsCard
           title="Balance"
           value={`$${bal.toLocaleString("en-US", { minimumFractionDigits: 2 })}`}
@@ -105,7 +105,7 @@ const Dashboard = () => {
         />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 md:gap-6">
         <div className="lg:col-span-3">
           <LiveChart />
         </div>
@@ -114,7 +114,7 @@ const Dashboard = () => {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6">
         <ActivePositionsTable />
         <RecentTradesTable />
       </div>

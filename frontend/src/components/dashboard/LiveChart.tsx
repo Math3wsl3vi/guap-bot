@@ -31,7 +31,16 @@ const TOOLTIP_STYLE = {
   fontSize: "12px",
 };
 
-function CandlestickBar(props: any) {
+interface CandlestickBarProps {
+  x: number;
+  width: number;
+  payload: { open: number; high: number; low: number; close: number };
+  background: { y: number; height: number } | null;
+  yMin?: number;
+  yMax?: number;
+}
+
+function CandlestickBar(props: CandlestickBarProps) {
   const { x, width, payload, background, yMin, yMax } = props;
   if (!background || !payload || yMin === undefined || yMax === undefined) return null;
 
@@ -145,45 +154,45 @@ export function LiveChart() {
     ),
   };
 
-  const renderCandlestick = (props: any) => (
+  const renderCandlestick = (props: CandlestickBarProps) => (
     <CandlestickBar {...props} yMin={yMin} yMax={yMax} />
   );
 
   return (
-    <Card className="bg-card border-border p-4">
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-3">
+    <Card className="bg-card border-border p-3 md:p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-3 md:mb-4">
+        <div className="flex items-center gap-2 md:gap-3">
           <h3 className="text-sm font-semibold text-foreground">{symbol}</h3>
           {currentPrice > 0 && (
-            <span className={`font-mono text-lg font-bold ${isUp ? "text-profit" : "text-loss"}`}>
+            <span className={`font-mono text-base md:text-lg font-bold ${isUp ? "text-profit" : "text-loss"}`}>
               {currentPrice.toFixed(decimals)}
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 md:gap-2">
           <Tabs value={chartType} onValueChange={(v) => setChartType(v as "line" | "candle")}>
-            <TabsList className="bg-muted h-8">
+            <TabsList className="bg-muted h-7 md:h-8">
               <TabsTrigger
                 value="line"
-                className="px-2 h-7 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
+                className="px-1.5 md:px-2 h-6 md:h-7 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
               >
                 <LineChart className="w-3.5 h-3.5" />
               </TabsTrigger>
               <TabsTrigger
                 value="candle"
-                className="px-2 h-7 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
+                className="px-1.5 md:px-2 h-6 md:h-7 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
               >
                 <CandlestickChart className="w-3.5 h-3.5" />
               </TabsTrigger>
             </TabsList>
           </Tabs>
           <Tabs value={timeframe} onValueChange={setTimeframe}>
-            <TabsList className="bg-muted h-8">
+            <TabsList className="bg-muted h-7 md:h-8">
               {["1m", "5m", "15m", "1h"].map((tf) => (
                 <TabsTrigger
                   key={tf}
                   value={tf}
-                  className="text-xs px-3 h-7 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
+                  className="text-xs px-2 md:px-3 h-6 md:h-7 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground"
                 >
                   {tf}
                 </TabsTrigger>
@@ -194,11 +203,11 @@ export function LiveChart() {
       </div>
 
       {data.length === 0 ? (
-        <div className="flex items-center justify-center h-[280px] text-muted-foreground text-sm">
+        <div className="flex items-center justify-center h-[240px] text-muted-foreground text-sm">
           Waiting for market data…
         </div>
       ) : chartType === "line" ? (
-        <ResponsiveContainer width="100%" height={280}>
+        <ResponsiveContainer width="100%" height={240}>
           <AreaChart data={data}>
             <defs>
               <linearGradient id="priceGrad" x1="0" y1="0" x2="0" y2="1">
@@ -225,7 +234,7 @@ export function LiveChart() {
           </AreaChart>
         </ResponsiveContainer>
       ) : (
-        <ResponsiveContainer width="100%" height={280}>
+        <ResponsiveContainer width="100%" height={240}>
           <ComposedChart data={data} barCategoryGap="10%">
             <CartesianGrid stroke="hsl(220,13%,18%)" strokeDasharray="3 3" vertical={false} />
             {sharedAxisProps.xAxis}
