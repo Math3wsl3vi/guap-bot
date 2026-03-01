@@ -1,6 +1,6 @@
 import { NavLink } from "@/components/NavLink";
 
-import { LayoutDashboard, BarChart3, Settings2, Terminal, Clock, ChevronLeft, ChevronRight, Bot, X } from "lucide-react";
+import { LayoutDashboard, BarChart3, Settings2, Terminal, Clock, ChevronLeft, ChevronRight, X } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 
@@ -30,9 +30,7 @@ export function AppSidebar({ onClose }: AppSidebarProps) {
     >
       <div className="flex items-center justify-between p-4 border-b border-sidebar-border h-16">
         <div className="flex items-center gap-2">
-          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary">
-            <Bot className="w-5 h-5 text-primary-foreground" />
-          </div>
+          <img src="/images/logo.png" alt="GuapBot" className="w-8 h-8 rounded-lg object-contain" />
           {!isCollapsed && <span className="text-lg font-bold text-foreground tracking-tight">ScalpX</span>}
         </div>
         {onClose && (
