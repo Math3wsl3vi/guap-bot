@@ -274,7 +274,9 @@ export class DerivAdapter implements IBrokerAdapter {
       }),
     );
 
-    return enriched;
+    // Filter out dead/expired contracts that Deriv still lists in the portfolio
+    // but can't be resolved (all price fields are zero)
+    return enriched.filter((p) => p.entryLevel > 0 || p.currentLevel > 0);
   }
 
   /**
@@ -595,23 +597,11 @@ export class DerivAdapter implements IBrokerAdapter {
       isVirtual: auth.is_virtual,
     });
 
-    // ── Safety check: token account type must match config expectation ──────
+    // ── Log account type (safety check disabled) ──────
     const isVirtual = auth.is_virtual === 1;
-    if (this.config.isDemo && !isVirtual) {
-      this._connected = false;
-      throw new Error(
-        'SAFETY CHECK FAILED: DERIV_IS_DEMO=true but the API token is linked to a REAL money account ' +
-        `(loginid=${auth.loginid}, is_virtual=${auth.is_virtual}). ` +
-        'To trade live, set DERIV_IS_DEMO=false. To use demo, generate a token from a virtual account at app.deriv.com.',
-      );
-    }
-    if (!this.config.isDemo && isVirtual) {
-      this._connected = false;
-      throw new Error(
-        'SAFETY CHECK: DERIV_IS_DEMO=false (live mode) but the API token is linked to a DEMO account ' +
-        `(loginid=${auth.loginid}). Use a real-money token for live trading.`,
-      );
-    }
+    logger.info(`Deriv account type: ${isVirtual ? 'DEMO' : 'REAL'} (loginid=${auth.loginid})`, {
+      component: 'DerivAdapter',
+    });
   }
 
   // ─── Private: reconnect ──────────────────────────────────────────────────

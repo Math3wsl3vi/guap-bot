@@ -43,14 +43,17 @@ const Dashboard = () => {
   useEffect(() => { setActiveTrades(positions ?? []); }, [positions]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const bal = account?.balance ?? 0;
+  const equity = account?.equity ?? 0;
   const todayPnL = account?.todayPnL ?? 0;
   const todayPnLPct = account?.todayPnLPercent ?? 0;
   const activeCount = positions?.length ?? 0;
   const winRate = metrics?.winRate ?? 0;
   const winTrades = metrics?.winningTrades ?? 0;
   const lossTrades = metrics?.losingTrades ?? 0;
+  const totalTrades = metrics?.totalTrades ?? 0;
   const tradesToday = status?.totalTradesToday ?? 0;
   const profitFactor = metrics?.profitFactor ?? 0;
+  const totalProfit = metrics?.totalProfit ?? 0;
 
   return (
     <div className="space-y-4 md:space-y-6">
@@ -58,8 +61,8 @@ const Dashboard = () => {
         <StatsCard
           title="Balance"
           value={`$${bal.toLocaleString("en-US", { minimumFractionDigits: 2 })}`}
-          change="+2.4% this week"
-          changeType="positive"
+          change={`Equity: $${equity.toLocaleString("en-US", { minimumFractionDigits: 2 })}`}
+          changeType={equity >= bal ? "positive" : "negative"}
           icon={DollarSign}
           iconClassName="bg-primary/10 text-primary"
         />
@@ -74,7 +77,6 @@ const Dashboard = () => {
         <StatsCard
           title="Active Trades"
           value={String(activeCount)}
-          change="of 3 max"
           changeType="neutral"
           icon={Activity}
           iconClassName="bg-primary/10 text-primary"
@@ -83,14 +85,14 @@ const Dashboard = () => {
           title="Win Rate"
           value={`${winRate}%`}
           change={`${winTrades}W / ${lossTrades}L`}
-          changeType="positive"
+          changeType={winRate >= 50 ? "positive" : winRate > 0 ? "negative" : "neutral"}
           icon={Target}
-          iconClassName="bg-profit/10 text-profit"
+          iconClassName={winRate >= 50 ? "bg-profit/10 text-profit" : "bg-loss/10 text-loss"}
         />
         <StatsCard
-          title="Total Trades"
+          title="Trades Today"
           value={String(tradesToday)}
-          change="today"
+          change={`${totalTrades} lifetime`}
           changeType="neutral"
           icon={BarChart3}
           iconClassName="bg-primary/10 text-primary"
@@ -98,10 +100,10 @@ const Dashboard = () => {
         <StatsCard
           title="Profit Factor"
           value={profitFactor.toFixed(2)}
-          change="above 2.0 target"
-          changeType="positive"
+          change={`$${totalProfit >= 0 ? "+" : ""}${totalProfit.toFixed(2)} total`}
+          changeType={profitFactor >= 1 ? "positive" : profitFactor > 0 ? "negative" : "neutral"}
           icon={Zap}
-          iconClassName="bg-warning/10 text-warning"
+          iconClassName={profitFactor >= 1 ? "bg-warning/10 text-warning" : "bg-loss/10 text-loss"}
         />
       </div>
 
