@@ -1,6 +1,7 @@
 import EventEmitter from 'events';
-import { Candle } from '../models/Candle';
+import { Candle, Timeframe } from '../models/Candle';
 import { IBrokerAdapter, TickData } from './IBrokerAdapter';
+import { TimeframeAggregator } from './TimeframeAggregator';
 import { strategyConfig } from '../config/strategy.config';
 import { logger } from '../utils/logger';
 
@@ -43,10 +44,19 @@ export class MarketDataService extends EventEmitter {
   private readonly maxReconnectAttempts = 10;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private stopped = false;
+  private readonly aggregator: TimeframeAggregator;
 
   constructor(adapter: IBrokerAdapter) {
     super();
     this.adapter = adapter;
+    this.aggregator = new TimeframeAggregator();
+
+    // Forward higher-TF candle events so consumers can listen on MarketDataService directly
+    for (const tf of TimeframeAggregator.timeframes) {
+      this.aggregator.on(`candle:close:${tf}`, (candle: Candle) => {
+        this.emit(`candle:close:${tf}`, candle);
+      });
+    }
   }
 
   async start(): Promise<void> {
@@ -69,9 +79,20 @@ export class MarketDataService extends EventEmitter {
     logger.info('MarketDataService stopped', { component: 'MarketDataService' });
   }
 
-  /** Returns a snapshot of the current rolling candle window (oldest → newest). */
-  getCandles(): Readonly<Candle[]> {
-    return this.candles;
+  /**
+   * Returns a snapshot of the rolling candle window for a given timeframe (oldest → newest).
+   * Defaults to 1m if no timeframe specified (backward compatible).
+   */
+  getCandles(timeframe?: Timeframe): readonly Candle[] {
+    if (!timeframe || timeframe === '1m') {
+      return this.candles;
+    }
+    return this.aggregator.getCandles(timeframe);
+  }
+
+  /** Returns the timeframe aggregator (used by bot.ts for HTF candle maps). */
+  getAggregator(): TimeframeAggregator {
+    return this.aggregator;
   }
 
   /** Returns the most recent tick (bid/ask/mid) for spread checking. */
@@ -158,6 +179,9 @@ export class MarketDataService extends EventEmitter {
       // Keep only the most recent CANDLE_WINDOW candles
       this.candles = historical.slice(-CANDLE_WINDOW);
 
+      // Build higher-timeframe candles from historical 1m data
+      this.aggregator.buildFromHistory(this.candles);
+
       logger.info('Warmup complete', {
         component: 'MarketDataService',
         candleCount: this.candles.length,
@@ -240,5 +264,8 @@ export class MarketDataService extends EventEmitter {
     });
 
     this.emit('candle:close', candle);
+
+    // Feed the closed 1m candle into the higher-timeframe aggregator
+    this.aggregator.onCandleClose(candle);
   }
 }
