@@ -52,8 +52,11 @@ export class MarketDataService extends EventEmitter {
   async start(): Promise<void> {
     this.stopped = false;
     logger.info('MarketDataService starting', { component: 'MarketDataService' });
-    await this.connectWithRetry();
-    await this.warmup();
+    const connected = await this.connectWithRetry();
+    // Only fetch historical candles if we actually subscribed to ticks
+    if (connected) {
+      await this.warmup();
+    }
   }
 
   async stop(): Promise<void> {
@@ -78,9 +81,12 @@ export class MarketDataService extends EventEmitter {
 
   // ─── Private: connection ─────────────────────────────────────────────────
 
-  private async connectWithRetry(): Promise<void> {
+  private async connectWithRetry(): Promise<boolean> {
     try {
-      await this.adapter.connect();
+      // Reuse existing connection if adapter is already connected (bot.ts connects first)
+      if (!this.adapter.isConnected()) {
+        await this.adapter.connect();
+      }
       this.reconnectAttempts = 0;
 
       await this.adapter.subscribeToTicks(strategyConfig.symbol, (tick) => this.onTick(tick));
@@ -89,33 +95,47 @@ export class MarketDataService extends EventEmitter {
         component: 'MarketDataService',
         symbol: strategyConfig.symbol,
       });
+      return true;
     } catch (err) {
-      logger.error('Connection attempt failed', {
+      const errMsg = (err as Error).message;
+      const isMarketClosed = errMsg.includes('MarketIsClosed');
+
+      logger.error(isMarketClosed ? 'Market is closed' : 'Connection attempt failed', {
         component: 'MarketDataService',
-        error: (err as Error).message,
+        error: errMsg,
         attempt: this.reconnectAttempts + 1,
       });
-      this.scheduleReconnect();
+
+      this.scheduleReconnect(isMarketClosed);
+      return false;
     }
   }
 
-  private scheduleReconnect(): void {
+  private scheduleReconnect(marketClosed = false): void {
     if (this.stopped) return;
 
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+    // Market-closed retries are infinite (market will eventually open) but use long backoff
+    if (!marketClosed && this.reconnectAttempts >= this.maxReconnectAttempts) {
       logger.error('Max reconnect attempts reached — giving up', { component: 'MarketDataService' });
       this.emit('fatal', new Error('Max WebSocket reconnect attempts exceeded'));
       return;
     }
 
-    // Exponential backoff: 1 s → 2 s → 4 s → … capped at 60 s
-    const delayMs = Math.min(1000 * 2 ** this.reconnectAttempts, 60_000);
+    // Market closed → 5 min polling. Connection error → exponential backoff capped at 60s.
+    const delayMs = marketClosed
+      ? 5 * 60_000
+      : Math.min(1000 * 2 ** this.reconnectAttempts, 60_000);
     this.reconnectAttempts++;
 
-    logger.info(`Reconnecting in ${delayMs}ms`, {
-      component: 'MarketDataService',
-      attempt: this.reconnectAttempts,
-    });
+    logger.info(
+      marketClosed
+        ? `Market closed — will retry in ${delayMs / 60_000} min`
+        : `Reconnecting in ${delayMs}ms`,
+      {
+        component: 'MarketDataService',
+        attempt: this.reconnectAttempts,
+      },
+    );
 
     this.reconnectTimer = setTimeout(() => this.connectWithRetry(), delayMs);
   }

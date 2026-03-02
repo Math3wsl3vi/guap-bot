@@ -479,12 +479,14 @@ export class DerivAdapter implements IBrokerAdapter {
           logger.info('Deriv WebSocket closed (intentional)', { component: 'DerivAdapter' });
           return;
         }
-        logger.warn('Deriv WebSocket closed unexpectedly — scheduling reconnect', {
+        // Don't auto-reconnect here — MarketDataService manages reconnection.
+        // DerivAdapter reconnect only triggers for mid-session unexpected drops
+        // (e.g. network blip while actively trading), not during startup/subscribe failures.
+        logger.warn('Deriv WebSocket closed unexpectedly', {
           component: 'DerivAdapter',
           code,
           reason: reason.toString(),
         });
-        this.scheduleReconnect();
       });
     });
   }
