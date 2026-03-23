@@ -1,5 +1,6 @@
 import { GridTradingStrategy, GridLevel } from '../../../src/strategies/GridTradingStrategy';
 import { strategyConfig } from '../../../src/config/strategy.config';
+import { Candle } from '../../../src/models/Candle';
 import { generateCandles } from '../../helpers/mocks';
 
 // Suppress logger output
@@ -19,6 +20,7 @@ describe('GridTradingStrategy', () => {
   const originalGridConfig = { ...strategyConfig.gridTrading };
   const originalSymbol = strategyConfig.symbol;
   const originalAdxPeriod = strategyConfig.adxPeriod;
+  const originalBroker = strategyConfig.broker;
 
   beforeEach(() => {
     // Reset grid config to known defaults
@@ -30,9 +32,13 @@ describe('GridTradingStrategy', () => {
       maxGridDrawdown: 0.05,
       trendDetectionEnabled: true,
       trendAdxThreshold: 30,
+      mode: undefined,
+      stopLossPerLevel: undefined,
     });
     strategyConfig.symbol = 'XAU_USD';
     strategyConfig.adxPeriod = 14;
+    // Default to LIMIT mode for existing tests
+    strategyConfig.broker = 'mt5';
 
     strategy = new GridTradingStrategy();
   });
@@ -41,6 +47,7 @@ describe('GridTradingStrategy', () => {
     Object.assign(strategyConfig.gridTrading, originalGridConfig);
     strategyConfig.symbol = originalSymbol;
     strategyConfig.adxPeriod = originalAdxPeriod;
+    strategyConfig.broker = originalBroker;
   });
 
   // ── Initialization ──────────────────────────────────────────────────────────
@@ -284,6 +291,312 @@ describe('GridTradingStrategy', () => {
 
       expect(pending.length).toBe(9);
       expect(filled.length).toBe(1);
+    });
+  });
+});
+
+// ─── Virtual mode tests (Deriv) ──────────────────────────────────────────────
+
+describe('GridTradingStrategy — VIRTUAL mode', () => {
+  let strategy: GridTradingStrategy;
+
+  const originalGridConfig = { ...strategyConfig.gridTrading };
+  const originalSymbol = strategyConfig.symbol;
+  const originalAdxPeriod = strategyConfig.adxPeriod;
+  const originalBroker = strategyConfig.broker;
+
+  beforeEach(() => {
+    Object.assign(strategyConfig.gridTrading, {
+      gridLevels: 5,
+      gridSpacing: 2.0,
+      lotSizePerLevel: 10,
+      takeProfitPerLevel: 1.0,
+      maxGridDrawdown: 0.05,
+      trendDetectionEnabled: true,
+      trendAdxThreshold: 30,
+      mode: undefined,
+      stopLossPerLevel: undefined,
+    });
+    strategyConfig.symbol = 'XAU_USD';
+    strategyConfig.adxPeriod = 14;
+    strategyConfig.broker = 'deriv'; // VIRTUAL mode
+
+    strategy = new GridTradingStrategy();
+  });
+
+  afterEach(() => {
+    Object.assign(strategyConfig.gridTrading, originalGridConfig);
+    strategyConfig.symbol = originalSymbol;
+    strategyConfig.adxPeriod = originalAdxPeriod;
+    strategyConfig.broker = originalBroker;
+  });
+
+  /** Helper to build a single candle with specific OHLC. */
+  function makeCandle(open: number, high: number, low: number, close: number): Candle {
+    return { timestamp: new Date(), open, high, low, close, volume: 100 };
+  }
+
+  describe('getGridMode()', () => {
+    it('should return VIRTUAL when broker is deriv', () => {
+      expect(strategy.getGridMode()).toBe('VIRTUAL');
+    });
+
+    it('should return LIMIT when broker is mt5', () => {
+      strategyConfig.broker = 'mt5';
+      const mt5Strategy = new GridTradingStrategy();
+      expect(mt5Strategy.getGridMode()).toBe('LIMIT');
+    });
+
+    it('should respect explicit mode override', () => {
+      strategyConfig.gridTrading.mode = 'LIMIT';
+      const overridden = new GridTradingStrategy();
+      expect(overridden.getGridMode()).toBe('LIMIT');
+    });
+  });
+
+  describe('initialize() — virtual', () => {
+    it('should create levels with WATCHING status', () => {
+      strategy.initialize(2700);
+      const state = strategy.getState();
+      state.levels.forEach(l => expect(l.status).toBe('WATCHING'));
+    });
+
+    it('should NOT emit gridOrders (no limit orders to place)', () => {
+      const signal = strategy.initialize(2700);
+      expect(signal.gridOrders).toBeUndefined();
+    });
+
+    it('should create correct number of levels', () => {
+      strategy.initialize(2700);
+      const state = strategy.getState();
+      expect(state.levels.length).toBe(10); // 5 BUY + 5 SELL
+    });
+
+    it('should compute stopLevel for each level', () => {
+      strategy.initialize(2700);
+      const state = strategy.getState();
+
+      const buyLevel = state.levels.find(l => l.price === 2698 && l.direction === 'BUY')!;
+      // SL = price - gridSpacing = 2698 - 2 = 2696
+      expect(buyLevel.stopLevel).toBe(2696);
+
+      const sellLevel = state.levels.find(l => l.price === 2702 && l.direction === 'SELL')!;
+      // SL = price + gridSpacing = 2702 + 2 = 2704
+      expect(sellLevel.stopLevel).toBe(2704);
+    });
+
+    it('should use custom stopLossPerLevel if configured', () => {
+      strategyConfig.gridTrading.stopLossPerLevel = 3.0;
+      const customStrategy = new GridTradingStrategy();
+      customStrategy.initialize(2700);
+
+      const state = customStrategy.getState();
+      const buyLevel = state.levels.find(l => l.price === 2698 && l.direction === 'BUY')!;
+      // SL = 2698 - 3 = 2695
+      expect(buyLevel.stopLevel).toBe(2695);
+    });
+  });
+
+  describe('checkPriceCrossings()', () => {
+    it('should detect BUY level crossing when candle.low <= level price', () => {
+      strategy.initialize(2700);
+      // BUY level at 2698; candle dips to 2697
+      const candle = makeCandle(2700, 2701, 2697, 2699);
+      const signal = strategy.checkPriceCrossings(candle, 10);
+
+      expect(signal.gridAction).toBe('VIRTUAL_FILL');
+      expect(signal.virtualFills).toBeDefined();
+      const buyFill = signal.virtualFills!.find(f => f.levelPrice === 2698);
+      expect(buyFill).toBeDefined();
+      expect(buyFill!.direction).toBe('BUY');
+    });
+
+    it('should detect SELL level crossing when candle.high >= level price', () => {
+      strategy.initialize(2700);
+      // SELL level at 2702; candle rises to 2703
+      const candle = makeCandle(2700, 2703, 2699, 2701);
+      const signal = strategy.checkPriceCrossings(candle, 10);
+
+      expect(signal.gridAction).toBe('VIRTUAL_FILL');
+      const sellFill = signal.virtualFills!.find(f => f.levelPrice === 2702);
+      expect(sellFill).toBeDefined();
+      expect(sellFill!.direction).toBe('SELL');
+    });
+
+    it('should return MONITOR when no levels are crossed', () => {
+      strategy.initialize(2700);
+      // Candle stays between 2699 and 2701 — no grid levels crossed
+      const candle = makeCandle(2700, 2701, 2699, 2700.5);
+      const signal = strategy.checkPriceCrossings(candle, 10);
+
+      expect(signal.gridAction).toBe('MONITOR');
+      expect(signal.virtualFills).toBeUndefined();
+    });
+
+    it('should detect multiple crossings in a single candle', () => {
+      strategy.initialize(2700);
+      // Wide candle: low=2695 crosses BUY@2698,2696; high=2705 crosses SELL@2702,2704
+      const candle = makeCandle(2700, 2705, 2695, 2700);
+      const signal = strategy.checkPriceCrossings(candle, 10);
+
+      expect(signal.virtualFills!.length).toBe(4);
+    });
+
+    it('should cap fills at maxFills', () => {
+      strategy.initialize(2700);
+      // Wide candle crossing many levels
+      const candle = makeCandle(2700, 2712, 2688, 2700);
+      const signal = strategy.checkPriceCrossings(candle, 2);
+
+      expect(signal.virtualFills!.length).toBe(2);
+    });
+
+    it('should mark triggered levels as TRIGGERED', () => {
+      strategy.initialize(2700);
+      const candle = makeCandle(2700, 2701, 2697, 2699);
+      strategy.checkPriceCrossings(candle, 10);
+
+      const state = strategy.getState();
+      const triggered = state.levels.filter(l => l.status === 'TRIGGERED');
+      expect(triggered.length).toBeGreaterThan(0);
+    });
+
+    it('should not re-trigger already TRIGGERED levels', () => {
+      strategy.initialize(2700);
+      const candle = makeCandle(2700, 2701, 2697, 2699);
+
+      // First crossing
+      strategy.checkPriceCrossings(candle, 10);
+      // Second crossing with same candle
+      const signal2 = strategy.checkPriceCrossings(candle, 10);
+
+      // The already-triggered level should not appear again
+      const fillsAt2698 = (signal2.virtualFills ?? []).filter(f => f.levelPrice === 2698);
+      expect(fillsAt2698.length).toBe(0);
+    });
+
+    it('should not trigger FILLED levels', () => {
+      strategy.initialize(2700);
+      const candle1 = makeCandle(2700, 2701, 2697, 2699);
+      strategy.checkPriceCrossings(candle1, 10);
+      strategy.confirmVirtualFill(2698, 'BUY', 'deal-1');
+
+      // Same level crossing again
+      const candle2 = makeCandle(2700, 2701, 2697, 2699);
+      const signal = strategy.checkPriceCrossings(candle2, 10);
+
+      const fillsAt2698 = (signal.virtualFills ?? []).filter(f => f.levelPrice === 2698);
+      expect(fillsAt2698.length).toBe(0);
+    });
+
+    it('should include correct profitLevel and stopLevel in fills', () => {
+      strategy.initialize(2700);
+      const candle = makeCandle(2700, 2701, 2697, 2699);
+      const signal = strategy.checkPriceCrossings(candle, 10);
+
+      const buyFill = signal.virtualFills!.find(f => f.levelPrice === 2698)!;
+      expect(buyFill.profitLevel).toBe(2699); // 2698 + 1
+      expect(buyFill.stopLevel).toBe(2696);   // 2698 - 2
+      expect(buyFill.size).toBe(10);
+    });
+  });
+
+  describe('confirmVirtualFill()', () => {
+    it('should move TRIGGERED level to FILLED with orderId', () => {
+      strategy.initialize(2700);
+      const candle = makeCandle(2700, 2701, 2697, 2699);
+      strategy.checkPriceCrossings(candle, 10);
+
+      strategy.confirmVirtualFill(2698, 'BUY', 'deal-123');
+
+      const state = strategy.getState();
+      const level = state.levels.find(l => l.price === 2698 && l.direction === 'BUY')!;
+      expect(level.status).toBe('FILLED');
+      expect(level.orderId).toBe('deal-123');
+    });
+  });
+
+  describe('revertTriggeredLevel()', () => {
+    it('should move TRIGGERED level back to WATCHING', () => {
+      strategy.initialize(2700);
+      const candle = makeCandle(2700, 2701, 2697, 2699);
+      strategy.checkPriceCrossings(candle, 10);
+
+      strategy.revertTriggeredLevel(2698, 'BUY');
+
+      const state = strategy.getState();
+      const level = state.levels.find(l => l.price === 2698 && l.direction === 'BUY')!;
+      expect(level.status).toBe('WATCHING');
+    });
+  });
+
+  describe('shutdown() — virtual', () => {
+    it('should return empty cancelOrderIds (no broker orders)', () => {
+      strategy.initialize(2700);
+      const signal = strategy.shutdown();
+
+      expect(signal.cancelOrderIds).toEqual([]);
+    });
+
+    it('should reset grid state', () => {
+      strategy.initialize(2700);
+      strategy.shutdown();
+
+      expect(strategy.isGridInitialized()).toBe(false);
+      expect(strategy.getState().levels.length).toBe(0);
+    });
+  });
+
+  describe('evaluate() — virtual rebalance', () => {
+    it('should rebalance with WATCHING levels and no gridOrders', () => {
+      strategy.initialize(2700);
+
+      const candles = generateCandles(30, {
+        basePrice: 2706,
+        closes: Array(30).fill(2706),
+      });
+
+      const signal = strategy.evaluate(candles);
+
+      expect(signal.gridAction).toBe('REBALANCE');
+      expect(signal.gridOrders).toBeUndefined();
+      expect(signal.cancelOrderIds).toEqual([]);
+
+      // New levels should be WATCHING
+      const state = strategy.getState();
+      state.levels.forEach(l => expect(l.status).toBe('WATCHING'));
+      expect(state.centerPrice).toBe(2706);
+    });
+
+    it('should defer rebalance when levels are TRIGGERED', () => {
+      strategy.initialize(2700);
+
+      // Trigger a level
+      const candle = makeCandle(2700, 2701, 2697, 2699);
+      strategy.checkPriceCrossings(candle, 10);
+
+      // Now try to rebalance with drifted price
+      const candles = generateCandles(30, {
+        basePrice: 2706,
+        closes: Array(30).fill(2706),
+      });
+
+      const signal = strategy.evaluate(candles);
+
+      // Should defer, not rebalance
+      expect(signal.gridAction).toBe('MONITOR');
+      expect(signal.reason).toContain('deferred');
+    });
+  });
+
+  describe('evaluate() — virtual monitoring', () => {
+    it('should report watching/filled counts', () => {
+      strategy.initialize(2700);
+      const candles = generateCandles(30, { basePrice: 2700 });
+      const signal = strategy.evaluate(candles);
+
+      expect(signal.gridAction).toBe('MONITOR');
+      expect(signal.reason).toContain('watching');
     });
   });
 });

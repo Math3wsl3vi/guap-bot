@@ -1,11 +1,24 @@
-import { Candle } from '../models/Candle';
+import { Candle, Timeframe } from '../models/Candle';
 import { StrategyType } from './StrategyType';
 
 export type SignalAction = 'BUY' | 'SELL' | 'HOLD';
 
 // ─── Grid-specific types ──────────────────────────────────────────────────────
 
-export type GridAction = 'INIT' | 'REBALANCE' | 'SHUTDOWN' | 'MONITOR';
+export type GridAction = 'INIT' | 'REBALANCE' | 'SHUTDOWN' | 'MONITOR' | 'VIRTUAL_FILL';
+
+export type GridMode = 'VIRTUAL' | 'LIMIT';
+
+export interface VirtualFill {
+  /** Grid level price that was crossed. */
+  levelPrice: number;
+  direction: 'BUY' | 'SELL';
+  size: number;
+  /** Take profit absolute price. */
+  profitLevel: number;
+  /** Stop loss absolute price. */
+  stopLevel: number;
+}
 
 export interface GridOrder {
   symbol: string;
@@ -45,6 +58,8 @@ export interface Signal {
   gridOrders?: GridOrder[];
   /** Order IDs to cancel (REBALANCE / SHUTDOWN). */
   cancelOrderIds?: string[];
+  /** Virtual grid fills — bot.ts places market orders for each. */
+  virtualFills?: VirtualFill[];
 }
 
 // ─── Lifecycle interface for stateful strategies (grid trading) ───────────────
@@ -62,12 +77,32 @@ export interface LifecycleStrategy {
   confirmOrderFilled(orderId: string): void;
   /** Update internal tracking after orders are cancelled. */
   confirmOrdersCancelled(orderIds: string[]): void;
+
+  // ── Virtual grid methods (Deriv — market orders instead of limit orders) ──
+
+  /** Returns the grid execution mode. */
+  getGridMode(): GridMode;
+  /** Check candle against virtual grid levels. Only used in VIRTUAL mode. */
+  checkPriceCrossings?(candle: Candle, maxFills: number): Signal;
+  /** Confirm a virtual grid fill after market order succeeds. */
+  confirmVirtualFill?(levelPrice: number, direction: 'BUY' | 'SELL', orderId: string): void;
+  /** Revert a triggered level back to WATCHING after market order fails. */
+  revertTriggeredLevel?(levelPrice: number, direction: 'BUY' | 'SELL'): void;
 }
 
 /** Type guard: check if a strategy implements the LifecycleStrategy interface. */
 export function hasLifecycle(s: BaseStrategy): s is BaseStrategy & LifecycleStrategy {
   return 'initialize' in s && 'shutdown' in s && 'isGridInitialized' in s;
 }
+
+// ─── Higher-timeframe candle map ──────────────────────────────────────────────
+
+/**
+ * Map of timeframe → candle history for higher-timeframe data.
+ * Strategies that need HTF confirmation (e.g., 15m trend filter on a 1m entry)
+ * can read from this map. Strategies that don't need HTF data simply ignore it.
+ */
+export type HTFCandleMap = ReadonlyMap<Timeframe, readonly Candle[]>;
 
 // ─── Base class ───────────────────────────────────────────────────────────────
 
@@ -78,6 +113,9 @@ export abstract class BaseStrategy {
   /**
    * Evaluate the candle history and return a trading signal.
    * Implementations must always return a Signal (never throw for normal cases).
+   *
+   * @param candles — primary timeframe candle history (e.g. 1m)
+   * @param htfCandles — optional higher-timeframe candle data for multi-TF strategies
    */
-  abstract evaluate(candles: readonly Candle[]): Signal;
+  abstract evaluate(candles: readonly Candle[], htfCandles?: HTFCandleMap): Signal;
 }

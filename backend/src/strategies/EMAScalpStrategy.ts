@@ -1,6 +1,7 @@
 import { Candle } from '../models/Candle';
 import { TechnicalIndicators } from '../indicators/TechnicalIndicators';
 import { strategyConfig } from '../config/strategy.config';
+import { getInstrumentConfig } from '../config/instruments.config';
 import { logger } from '../utils/logger';
 import { BaseStrategy, Signal } from './BaseStrategy';
 import { StrategyType } from './StrategyType';
@@ -41,7 +42,7 @@ export class EMAScalpStrategy extends BaseStrategy {
   private readonly atrSlMultiplier: number;
   private readonly atrTpMultiplier: number;
   private readonly minBodyPips: number;
-  /** Monetary value of 1 pip (XAU/USD = $0.01 per unit). Used for body-size filter. */
+  /** Monetary value of 1 pip for the active instrument. Derived from instruments.config. */
   private readonly pipSize: number;
   private readonly sessionFilterEnabled: boolean;
   private readonly blockedRanges: BlockedRange[];
@@ -71,7 +72,7 @@ export class EMAScalpStrategy extends BaseStrategy {
     this.atrSlMultiplier = strategyConfig.atrSlMultiplier;
     this.atrTpMultiplier = strategyConfig.atrTpMultiplier;
     this.minBodyPips = strategyConfig.minBodyPips;
-    this.pipSize = parseFloat(process.env.PIP_SIZE ?? '0.01');
+    this.pipSize = getInstrumentConfig(strategyConfig.symbol).pipSize;
     this.sessionFilterEnabled = strategyConfig.sessionFilterEnabled;
     this.blockedRanges = parseBlockedHours(strategyConfig.blockedHoursUtc);
 

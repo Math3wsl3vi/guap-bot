@@ -126,6 +126,34 @@ export interface IBrokerAdapter {
    */
   updateStopLoss(dealId: string, stopLevel: number): Promise<void>;
 
+  // ─── Accumulator contracts (optional — Deriv only) ───────────────────────
+
+  /**
+   * Place an accumulator (ACCU) contract.
+   * Returns the contract ID so it can be tracked and sold.
+   */
+  placeAccumulator?(params: {
+    symbol: string;
+    stake: number;
+    growthRate: number;
+    takeProfitUSD?: number;
+  }): Promise<{ dealId: string; stake: number; symbol: string; openedAt: Date }>;
+
+  /**
+   * Place a binary option contract (Rise/Fall, Even/Odd, Digit Over/Under).
+   * Returns the contract ID and payout info.
+   */
+  placeBinaryOption?(params: {
+    symbol: string;
+    stake: number;
+    /** Deriv contract type: CALL, PUT, DIGITEVEN, DIGITODD, DIGITOVER, DIGITUNDER */
+    contractType: string;
+    /** Duration in ticks */
+    durationTicks: number;
+    /** Barrier digit for DIGITOVER/DIGITUNDER (0-9) */
+    barrier?: number;
+  }): Promise<{ dealId: string; stake: number; symbol: string; payout: number; openedAt: Date }>;
+
   // ─── Pending Orders (optional — only MT5 supports these) ─────────────────
 
   /** Place a limit order (buy below / sell above current price). */

@@ -1,5 +1,5 @@
 import { Card } from "@/components/ui/card";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AreaChart,
   Area,
@@ -81,29 +81,44 @@ export function LiveChart() {
   const [timeframe, setTimeframe] = useState("1m");
   const [chartType, setChartType] = useState<"line" | "candle">("line");
 
+  // Fetch candles for the selected timeframe
   const { data: initialCandles } = useQuery({
-    queryKey: ["candles"],
-    queryFn: () => api.candles(MAX_CANDLES),
+    queryKey: ["candles", timeframe],
+    queryFn: () => api.candles(MAX_CANDLES, timeframe),
   });
 
   const [candles, setCandles] = useState<CandleData[]>([]);
-  const initialSet = useRef(false);
+  const lastTimeframeRef = useRef(timeframe);
 
+  // Reset candles when timeframe changes or initial data loads
   useEffect(() => {
-    if (initialCandles && !initialSet.current) {
-      initialSet.current = true;
+    if (initialCandles) {
       setCandles(initialCandles);
+      lastTimeframeRef.current = timeframe;
     }
-  }, [initialCandles]);
+  }, [initialCandles, timeframe]);
 
+  // Handle live WebSocket candle updates
   const { lastCandle } = useWebSocket();
+  const handleLiveCandle = useCallback(
+    (candle: CandleData) => {
+      // Only append candles matching the currently viewed timeframe.
+      // Higher-TF candles arrive with a `timeframe` field via WS; 1m candles have none.
+      const candleTf = candle.timeframe ?? "1m";
+      if (candleTf !== timeframe) return;
+
+      setCandles((prev) => {
+        const next = [...prev, candle];
+        return next.length > MAX_CANDLES ? next.slice(-MAX_CANDLES) : next;
+      });
+    },
+    [timeframe],
+  );
+
   useEffect(() => {
     if (!lastCandle) return;
-    setCandles((prev) => {
-      const next = [...prev, lastCandle];
-      return next.length > MAX_CANDLES ? next.slice(-MAX_CANDLES) : next;
-    });
-  }, [lastCandle]);
+    handleLiveCandle(lastCandle);
+  }, [lastCandle, handleLiveCandle]);
 
   const data = useMemo(
     () =>
@@ -204,7 +219,7 @@ export function LiveChart() {
 
       {data.length === 0 ? (
         <div className="flex items-center justify-center h-[240px] text-muted-foreground text-sm">
-          Waiting for market data…
+          {timeframe === "1m" ? "Waiting for market data…" : `Waiting for ${timeframe} candles…`}
         </div>
       ) : chartType === "line" ? (
         <ResponsiveContainer width="100%" height={240}>

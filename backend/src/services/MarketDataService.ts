@@ -9,6 +9,8 @@ import { logger } from '../utils/logger';
 const CANDLE_WINDOW = 200;
 // How many historical candles to fetch on startup for indicator warmup
 const WARMUP_CANDLES = 100;
+// Rolling window of recent tick mid-prices for tick-level indicators
+const TICK_PRICE_WINDOW = 150;
 
 interface CandleBuilder {
   open: number;
@@ -33,6 +35,7 @@ interface CandleBuilder {
  *
  * Events:
  *  - `candle:close`  (candle: Candle)  — emitted when a 1-minute bar closes
+ *  - `tick`          (tick: TickData)  — emitted on every live price tick
  *  - `fatal`         (err: Error)      — emitted when reconnect limit is exceeded
  */
 export class MarketDataService extends EventEmitter {
@@ -40,6 +43,7 @@ export class MarketDataService extends EventEmitter {
   private candles: Candle[] = [];
   private currentBar: CandleBuilder | null = null;
   private lastTick: TickData | null = null;
+  private tickPrices: number[] = [];
   private reconnectAttempts = 0;
   private readonly maxReconnectAttempts = 10;
   private reconnectTimer: NodeJS.Timeout | null = null;
@@ -98,6 +102,11 @@ export class MarketDataService extends EventEmitter {
   /** Returns the most recent tick (bid/ask/mid) for spread checking. */
   getLastTick(): TickData | null {
     return this.lastTick;
+  }
+
+  /** Returns the rolling buffer of recent tick mid-prices for tick-level indicators. */
+  getTickPrices(): readonly number[] {
+    return this.tickPrices;
   }
 
   // ─── Private: connection ─────────────────────────────────────────────────
@@ -200,6 +209,9 @@ export class MarketDataService extends EventEmitter {
 
   private onTick(tick: TickData): void {
     this.lastTick = tick;
+    this.tickPrices.push(tick.mid);
+    if (this.tickPrices.length > TICK_PRICE_WINDOW) this.tickPrices.shift();
+    this.emit('tick', tick);
 
     // Floor the tick timestamp to the nearest minute
     const minuteTs = Math.floor(tick.timestamp.getTime() / 60_000) * 60_000;

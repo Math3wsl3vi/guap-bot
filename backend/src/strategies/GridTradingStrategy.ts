@@ -6,6 +6,8 @@ import {
   BaseStrategy,
   Signal,
   GridOrder,
+  GridMode,
+  VirtualFill,
   LifecycleStrategy,
 } from './BaseStrategy';
 import { StrategyType } from './StrategyType';
@@ -14,7 +16,12 @@ const COMPONENT = 'GridTradingStrategy';
 
 // ─── Internal grid state ──────────────────────────────────────────────────────
 
-export type GridLevelStatus = 'PENDING' | 'FILLED' | 'CANCELLED';
+export type GridLevelStatus =
+  | 'PENDING'     // Limit order placed on broker (LIMIT mode)
+  | 'WATCHING'    // Virtual level waiting for price crossing (VIRTUAL mode)
+  | 'TRIGGERED'   // Price crossed level — market order in flight (VIRTUAL mode)
+  | 'FILLED'      // Position opened (either mode)
+  | 'CANCELLED';  // Level cancelled (rebalance/shutdown)
 
 export interface GridLevel {
   price: number;
@@ -22,6 +29,7 @@ export interface GridLevel {
   orderId: string | null;
   status: GridLevelStatus;
   profitLevel: number;
+  stopLevel: number;
 }
 
 export interface GridState {
@@ -39,6 +47,8 @@ export class GridTradingStrategy extends BaseStrategy implements LifecycleStrate
   private state: GridState;
   private readonly cfg: GridTradingConfig;
   private readonly adxPeriod: number;
+  private readonly mode: GridMode;
+  private readonly slPerLevel: number;
 
   /** Minimum candles for ADX to be valid: 2 × period + 1. */
   private readonly minCandles: number;
@@ -48,14 +58,22 @@ export class GridTradingStrategy extends BaseStrategy implements LifecycleStrate
     this.cfg = strategyConfig.gridTrading;
     this.adxPeriod = strategyConfig.adxPeriod;
     this.minCandles = this.adxPeriod * 2 + 1;
+    this.mode = this.cfg.mode ?? (strategyConfig.broker === 'mt5' ? 'LIMIT' : 'VIRTUAL');
+    this.slPerLevel = this.cfg.stopLossPerLevel ?? this.cfg.gridSpacing;
     this.state = { centerPrice: 0, levels: [], initialized: false };
   }
 
   // ─── Lifecycle ──────────────────────────────────────────────────────────────
 
+  getGridMode(): GridMode {
+    return this.mode;
+  }
+
   initialize(currentPrice: number): Signal {
     const { gridLevels, gridSpacing, lotSizePerLevel, takeProfitPerLevel } = this.cfg;
     const symbol = strategyConfig.symbol;
+    const isVirtual = this.mode === 'VIRTUAL';
+    const initialStatus: GridLevelStatus = isVirtual ? 'WATCHING' : 'PENDING';
 
     this.state.centerPrice = currentPrice;
     this.state.levels = [];
@@ -66,58 +84,73 @@ export class GridTradingStrategy extends BaseStrategy implements LifecycleStrate
     for (let i = 1; i <= gridLevels; i++) {
       const price = currentPrice - i * gridSpacing;
       const profitLevel = price + takeProfitPerLevel;
+      const stopLevel = price - this.slPerLevel;
 
       this.state.levels.push({
         price,
         direction: 'BUY',
         orderId: null,
-        status: 'PENDING',
+        status: initialStatus,
         profitLevel,
+        stopLevel,
       });
-      gridOrders.push({ symbol, direction: 'BUY', size: lotSizePerLevel, price, profitLevel });
+
+      if (!isVirtual) {
+        gridOrders.push({ symbol, direction: 'BUY', size: lotSizePerLevel, price, profitLevel });
+      }
     }
 
     // SELL limits above current price
     for (let i = 1; i <= gridLevels; i++) {
       const price = currentPrice + i * gridSpacing;
       const profitLevel = price - takeProfitPerLevel;
+      const stopLevel = price + this.slPerLevel;
 
       this.state.levels.push({
         price,
         direction: 'SELL',
         orderId: null,
-        status: 'PENDING',
+        status: initialStatus,
         profitLevel,
+        stopLevel,
       });
-      gridOrders.push({ symbol, direction: 'SELL', size: lotSizePerLevel, price, profitLevel });
+
+      if (!isVirtual) {
+        gridOrders.push({ symbol, direction: 'SELL', size: lotSizePerLevel, price, profitLevel });
+      }
     }
 
     this.state.initialized = true;
 
     logger.info('Grid initialized', {
       component: COMPONENT,
+      mode: this.mode,
       center: currentPrice,
       levels: gridLevels,
       spacing: gridSpacing,
-      totalOrders: gridOrders.length,
+      totalOrders: isVirtual ? this.state.levels.length : gridOrders.length,
     });
 
     return {
       action: 'HOLD',
-      reason: `Grid initialized: ${gridLevels} levels each side, center $${currentPrice.toFixed(2)}, spacing $${gridSpacing}`,
+      reason: `Grid initialized (${this.mode}): ${gridLevels} levels each side, center $${currentPrice.toFixed(2)}, spacing $${gridSpacing}`,
       strategyType: this.type,
       gridAction: 'INIT',
-      gridOrders,
+      gridOrders: isVirtual ? undefined : gridOrders,
     };
   }
 
   shutdown(): Signal {
-    const cancelOrderIds = this.state.levels
-      .filter((l) => l.orderId && l.status === 'PENDING')
-      .map((l) => l.orderId!);
+    // In VIRTUAL mode there are no broker-side orders to cancel
+    const cancelOrderIds = this.mode === 'LIMIT'
+      ? this.state.levels
+          .filter((l) => l.orderId && l.status === 'PENDING')
+          .map((l) => l.orderId!)
+      : [];
 
     logger.info('Grid shutting down', {
       component: COMPONENT,
+      mode: this.mode,
       ordersToCancel: cancelOrderIds.length,
     });
 
@@ -185,6 +218,105 @@ export class GridTradingStrategy extends BaseStrategy implements LifecycleStrate
     };
   }
 
+  // ─── Virtual grid: price crossing detection ────────────────────────────────
+
+  checkPriceCrossings(candle: Candle, maxFills: number): Signal {
+    if (!this.state.initialized || this.mode !== 'VIRTUAL') {
+      return {
+        action: 'HOLD',
+        reason: 'Not in virtual mode or not initialized',
+        strategyType: this.type,
+        gridAction: 'MONITOR',
+      };
+    }
+
+    const watchingLevels = this.state.levels.filter((l) => l.status === 'WATCHING');
+
+    // Find all levels whose price was crossed by this candle
+    const crossed: GridLevel[] = [];
+    for (const level of watchingLevels) {
+      if (level.direction === 'BUY' && candle.low <= level.price) {
+        crossed.push(level);
+      } else if (level.direction === 'SELL' && candle.high >= level.price) {
+        crossed.push(level);
+      }
+    }
+
+    if (crossed.length === 0) {
+      return {
+        action: 'HOLD',
+        reason: 'No grid levels crossed',
+        strategyType: this.type,
+        gridAction: 'MONITOR',
+      };
+    }
+
+    // Sort by distance from candle open (closest crossed first)
+    crossed.sort(
+      (a, b) => Math.abs(a.price - candle.open) - Math.abs(b.price - candle.open),
+    );
+
+    // Only trigger up to maxFills
+    const toTrigger = crossed.slice(0, Math.max(0, maxFills));
+    const virtualFills: VirtualFill[] = [];
+
+    for (const level of toTrigger) {
+      level.status = 'TRIGGERED';
+      virtualFills.push({
+        levelPrice: level.price,
+        direction: level.direction,
+        size: this.cfg.lotSizePerLevel,
+        profitLevel: level.profitLevel,
+        stopLevel: level.stopLevel,
+      });
+    }
+
+    logger.info('Virtual grid levels triggered', {
+      component: COMPONENT,
+      triggered: virtualFills.length,
+      skipped: crossed.length - virtualFills.length,
+      levels: virtualFills.map((f) => `${f.direction}@${f.levelPrice}`),
+    });
+
+    return {
+      action: 'HOLD',
+      reason: `${virtualFills.length} grid level(s) triggered`,
+      strategyType: this.type,
+      gridAction: 'VIRTUAL_FILL',
+      virtualFills,
+    };
+  }
+
+  confirmVirtualFill(levelPrice: number, direction: 'BUY' | 'SELL', orderId: string): void {
+    const level = this.state.levels.find(
+      (l) => l.price === levelPrice && l.direction === direction && l.status === 'TRIGGERED',
+    );
+    if (level) {
+      level.status = 'FILLED';
+      level.orderId = orderId;
+      logger.info('Virtual grid fill confirmed', {
+        component: COMPONENT,
+        orderId,
+        price: levelPrice,
+        direction,
+      });
+    }
+  }
+
+  revertTriggeredLevel(levelPrice: number, direction: 'BUY' | 'SELL'): void {
+    const level = this.state.levels.find(
+      (l) => l.price === levelPrice && l.direction === direction && l.status === 'TRIGGERED',
+    );
+    if (level) {
+      level.status = 'WATCHING';
+      logger.warn('Virtual grid level reverted to WATCHING', {
+        component: COMPONENT,
+        price: levelPrice,
+        direction,
+      });
+    }
+  }
+
   // ─── Per-candle evaluation ──────────────────────────────────────────────────
 
   evaluate(candles: readonly Candle[]): Signal {
@@ -216,47 +348,66 @@ export class GridTradingStrategy extends BaseStrategy implements LifecycleStrate
     const rebalanceThreshold = (this.cfg.gridLevels * this.cfg.gridSpacing) / 2;
 
     if (drift > rebalanceThreshold) {
-      const cancelOrderIds = this.state.levels
-        .filter((l) => l.orderId && l.status === 'PENDING')
-        .map((l) => l.orderId!);
+      // Defer rebalance if any virtual levels have in-flight market orders
+      if (this.mode === 'VIRTUAL') {
+        const inFlight = this.state.levels.filter((l) => l.status === 'TRIGGERED').length;
+        if (inFlight > 0) {
+          return {
+            action: 'HOLD',
+            reason: `Grid rebalance deferred: ${inFlight} level(s) in flight`,
+            strategyType: this.type,
+            gridAction: 'MONITOR',
+          };
+        }
+      }
+
+      const cancelOrderIds = this.mode === 'LIMIT'
+        ? this.state.levels
+            .filter((l) => l.orderId && l.status === 'PENDING')
+            .map((l) => l.orderId!)
+        : [];
 
       const newGridOrders = this.calculateNewGrid(currentPrice);
 
       // Reset state for the new grid
+      const isVirtual = this.mode === 'VIRTUAL';
+      const newStatus: GridLevelStatus = isVirtual ? 'WATCHING' : 'PENDING';
       this.state.centerPrice = currentPrice;
       this.state.levels = newGridOrders.map((o) => ({
         price: o.price,
         direction: o.direction,
         orderId: null,
-        status: 'PENDING' as const,
+        status: newStatus,
         profitLevel: o.profitLevel,
+        stopLevel: o.direction === 'BUY' ? o.price - this.slPerLevel : o.price + this.slPerLevel,
       }));
 
       logger.info('Grid rebalancing', {
         component: COMPONENT,
+        mode: this.mode,
         drift: drift.toFixed(2),
         threshold: rebalanceThreshold.toFixed(2),
-        oldCenter: this.state.centerPrice,
         newCenter: currentPrice,
       });
 
       return {
         action: 'HOLD',
-        reason: `Grid rebalance: price drifted $${drift.toFixed(2)} from center $${this.state.centerPrice.toFixed(2)}`,
+        reason: `Grid rebalance: price drifted $${drift.toFixed(2)} from center`,
         strategyType: this.type,
         gridAction: 'REBALANCE',
         cancelOrderIds,
-        gridOrders: newGridOrders,
+        gridOrders: isVirtual ? undefined : newGridOrders,
       };
     }
 
     // ── Normal monitoring ─────────────────────────────────────────────────
-    const pendingCount = this.state.levels.filter((l) => l.status === 'PENDING').length;
+    const activeStatus = this.mode === 'VIRTUAL' ? 'WATCHING' : 'PENDING';
+    const pendingCount = this.state.levels.filter((l) => l.status === activeStatus).length;
     const filledCount = this.state.levels.filter((l) => l.status === 'FILLED').length;
 
     return {
       action: 'HOLD',
-      reason: `Grid healthy: ${pendingCount} pending, ${filledCount} filled, center $${this.state.centerPrice.toFixed(2)}`,
+      reason: `Grid healthy: ${pendingCount} ${activeStatus.toLowerCase()}, ${filledCount} filled, center $${this.state.centerPrice.toFixed(2)}`,
       strategyType: this.type,
       gridAction: 'MONITOR',
     };

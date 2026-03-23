@@ -9,6 +9,7 @@ import Dashboard from "./pages/Dashboard";
 import Analytics from "./pages/Analytics";
 import Strategy from "./pages/Strategy";
 import Logs from "./pages/Logs";
+import Trades from "./pages/Trades";
 import Backtesting from "./pages/Backtesting";
 import NotFound from "./pages/NotFound";
 
@@ -54,6 +55,7 @@ const App = () => (
             <ErrorBoundary>
               <Routes>
                 <Route path="/" element={<Dashboard />} />
+                <Route path="/trades" element={<Trades />} />
                 <Route path="/analytics" element={<Analytics />} />
                 <Route path="/strategy" element={<Strategy />} />
                 <Route path="/logs" element={<Logs />} />

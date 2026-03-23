@@ -166,6 +166,87 @@ describe('TechnicalIndicators', () => {
     });
   });
 
+  // ── Bollinger Bands ───────────────────────────────────────────────────────
+
+  describe('calculateBollingerBands()', () => {
+    it('should return NaN for the first (period - 1) values', () => {
+      const prices = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+      const bb = TechnicalIndicators.calculateBollingerBands(prices, 5, 2.0);
+
+      for (let i = 0; i < 4; i++) {
+        expect(bb.upper[i]).toBeNaN();
+        expect(bb.middle[i]).toBeNaN();
+        expect(bb.lower[i]).toBeNaN();
+      }
+      expect(bb.middle[4]).not.toBeNaN();
+    });
+
+    it('should have middle band equal to SMA', () => {
+      const prices = [10, 20, 30, 40, 50];
+      const bb = TechnicalIndicators.calculateBollingerBands(prices, 3, 2.0);
+
+      // SMA(10,20,30) = 20, SMA(20,30,40) = 30, SMA(30,40,50) = 40
+      expect(bb.middle[2]).toBeCloseTo(20, 5);
+      expect(bb.middle[3]).toBeCloseTo(30, 5);
+      expect(bb.middle[4]).toBeCloseTo(40, 5);
+    });
+
+    it('should have upper > middle > lower for non-constant prices', () => {
+      const prices = [10, 20, 15, 25, 18, 22, 30, 28, 35, 20];
+      const bb = TechnicalIndicators.calculateBollingerBands(prices, 5, 2.0);
+
+      for (let i = 4; i < prices.length; i++) {
+        expect(bb.upper[i]).toBeGreaterThan(bb.middle[i]);
+        expect(bb.middle[i]).toBeGreaterThan(bb.lower[i]);
+      }
+    });
+
+    it('should have upper === middle === lower for constant prices', () => {
+      const prices = [50, 50, 50, 50, 50];
+      const bb = TechnicalIndicators.calculateBollingerBands(prices, 3, 2.0);
+
+      // StdDev = 0 for constant prices
+      expect(bb.upper[2]).toBeCloseTo(50, 5);
+      expect(bb.middle[2]).toBeCloseTo(50, 5);
+      expect(bb.lower[2]).toBeCloseTo(50, 5);
+    });
+
+    it('should return same-length arrays as input', () => {
+      const prices = Array.from({ length: 30 }, (_, i) => 100 + Math.sin(i) * 5);
+      const bb = TechnicalIndicators.calculateBollingerBands(prices, 20, 2.0);
+
+      expect(bb.upper.length).toBe(prices.length);
+      expect(bb.middle.length).toBe(prices.length);
+      expect(bb.lower.length).toBe(prices.length);
+    });
+
+    it('should return all NaN when prices length < period', () => {
+      const prices = [1, 2, 3];
+      const bb = TechnicalIndicators.calculateBollingerBands(prices, 5, 2.0);
+
+      bb.upper.forEach(v => expect(v).toBeNaN());
+      bb.middle.forEach(v => expect(v).toBeNaN());
+      bb.lower.forEach(v => expect(v).toBeNaN());
+    });
+
+    it('should throw when period <= 0', () => {
+      expect(() => TechnicalIndicators.calculateBollingerBands([1, 2, 3], 0)).toThrow();
+      expect(() => TechnicalIndicators.calculateBollingerBands([1, 2, 3], -1)).toThrow();
+    });
+
+    it('should widen bands with higher stdDev multiplier', () => {
+      const prices = [10, 20, 15, 25, 18, 22, 30, 28, 35, 20];
+      const bb1 = TechnicalIndicators.calculateBollingerBands(prices, 5, 1.0);
+      const bb2 = TechnicalIndicators.calculateBollingerBands(prices, 5, 3.0);
+
+      for (let i = 4; i < prices.length; i++) {
+        const width1 = bb1.upper[i] - bb1.lower[i];
+        const width2 = bb2.upper[i] - bb2.lower[i];
+        expect(width2).toBeGreaterThan(width1);
+      }
+    });
+  });
+
   // ── MACD ───────────────────────────────────────────────────────────────────
 
   describe('calculateMACD()', () => {

@@ -1,3 +1,12 @@
+export interface BollingerBandsResult {
+  /** Upper band: SMA + stdDev × multiplier */
+  upper: number[];
+  /** Middle band: Simple Moving Average */
+  middle: number[];
+  /** Lower band: SMA - stdDev × multiplier */
+  lower: number[];
+}
+
 export interface MACDResult {
   /** MACD line: EMA(fast) - EMA(slow) */
   macd: number[];
@@ -192,6 +201,52 @@ export class TechnicalIndicators {
     }
 
     return { plusDI, minusDI, adx };
+  }
+
+  /**
+   * Bollinger Bands using a rolling SMA and standard deviation.
+   * Returns arrays of the same length as `prices`.
+   * The first (period - 1) values are NaN.
+   */
+  static calculateBollingerBands(
+    prices: number[],
+    period: number = 20,
+    stdDevMultiplier: number = 2.0,
+  ): BollingerBandsResult {
+    if (period <= 0) throw new Error('Bollinger Bands period must be > 0');
+    const n = prices.length;
+    if (n < period) {
+      return {
+        upper: new Array(n).fill(NaN),
+        middle: new Array(n).fill(NaN),
+        lower: new Array(n).fill(NaN),
+      };
+    }
+
+    const upper: number[] = new Array(n).fill(NaN);
+    const middle: number[] = new Array(n).fill(NaN);
+    const lower: number[] = new Array(n).fill(NaN);
+
+    for (let i = period - 1; i < n; i++) {
+      // SMA over window [i - period + 1 .. i]
+      let sum = 0;
+      for (let j = i - period + 1; j <= i; j++) sum += prices[j];
+      const sma = sum / period;
+
+      // Standard deviation over the same window
+      let sqSum = 0;
+      for (let j = i - period + 1; j <= i; j++) {
+        const diff = prices[j] - sma;
+        sqSum += diff * diff;
+      }
+      const stdDev = Math.sqrt(sqSum / period);
+
+      middle[i] = sma;
+      upper[i] = sma + stdDevMultiplier * stdDev;
+      lower[i] = sma - stdDevMultiplier * stdDev;
+    }
+
+    return { upper, middle, lower };
   }
 
   /**

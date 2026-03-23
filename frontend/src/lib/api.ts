@@ -8,6 +8,9 @@ import {
   StrategyConfig,
   SystemHealth,
   Trade,
+  TradeFilters,
+  TradesResponse,
+  TradingPreset,
 } from '@/types';
 
 const BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:3001';
@@ -55,13 +58,27 @@ export const api = {
     get('/api/positions'),
 
   trades: (limit = 50): Promise<Trade[]> =>
-    get('/api/trades', { limit }),
+    get<TradesResponse>('/api/trades', { limit }).then((r) => r.trades),
+
+  tradesFiltered: (filters: TradeFilters = {}): Promise<TradesResponse> => {
+    const params: Record<string, string | number> = {};
+    if (filters.from) params.from = filters.from;
+    if (filters.to) params.to = filters.to;
+    if (filters.strategy) params.strategy = filters.strategy;
+    if (filters.status) params.status = filters.status;
+    if (filters.outcome) params.outcome = filters.outcome;
+    if (filters.minSize != null) params.minSize = filters.minSize;
+    if (filters.maxSize != null) params.maxSize = filters.maxSize;
+    if (filters.limit != null) params.limit = filters.limit;
+    if (filters.offset != null) params.offset = filters.offset;
+    return get('/api/trades', params);
+  },
 
   metrics: (): Promise<Metrics> =>
     get('/api/metrics'),
 
-  candles: (limit = 60): Promise<CandleData[]> =>
-    get('/api/candles', { limit }),
+  candles: (limit = 60, timeframe = '1m'): Promise<CandleData[]> =>
+    get('/api/candles', { limit, timeframe }),
 
   logs: (limit = 100): Promise<LogEntry[]> =>
     get('/api/logs', { limit }),
@@ -78,6 +95,12 @@ export const api = {
   updateStrategy: (config: StrategyConfig): Promise<{ success: boolean }> =>
     put('/api/strategy', config),
 
+  presets: (): Promise<TradingPreset[]> =>
+    get('/api/presets'),
+
+  applyPreset: (id: string): Promise<{ success: boolean; presetId: string }> =>
+    post(`/api/presets/apply/${id}`),
+
   closePosition: (id: string): Promise<{ success: boolean }> =>
     post(`/api/positions/${id}/close`),
 
@@ -90,6 +113,18 @@ export const api = {
   botPause: (): Promise<{ success: boolean; isPaused: boolean }> =>
     post('/api/bot/pause'),
 };
+
+export function buildExportUrl(format: 'csv' | 'pdf', filters: TradeFilters = {}): string {
+  const url = new URL(`${BASE}/api/trades/export/${format}`);
+  if (filters.from) url.searchParams.set('from', filters.from);
+  if (filters.to) url.searchParams.set('to', filters.to);
+  if (filters.strategy) url.searchParams.set('strategy', filters.strategy);
+  if (filters.status) url.searchParams.set('status', filters.status);
+  if (filters.outcome) url.searchParams.set('outcome', filters.outcome);
+  if (filters.minSize != null) url.searchParams.set('minSize', String(filters.minSize));
+  if (filters.maxSize != null) url.searchParams.set('maxSize', String(filters.maxSize));
+  return url.toString();
+}
 
 export const WS_URL = (import.meta.env.VITE_API_URL ?? 'http://localhost:3001').replace(
   /^http/,

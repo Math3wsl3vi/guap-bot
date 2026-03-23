@@ -2,7 +2,7 @@ import { Card } from "@/components/ui/card";
 import { useBotStore } from "@/stores/botStore";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
-import { X } from "lucide-react";
+import { X, TrendingUp } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -42,6 +42,7 @@ export function ActivePositionsTable() {
               <TableHead className="text-muted-foreground text-xs text-right">Current</TableHead>
               <TableHead className="text-muted-foreground text-xs text-right">P&L</TableHead>
               <TableHead className="text-muted-foreground text-xs text-right">SL</TableHead>
+              <TableHead className="text-muted-foreground text-xs text-right">Trail</TableHead>
               <TableHead className="text-muted-foreground text-xs text-right">TP</TableHead>
               <TableHead className="text-muted-foreground text-xs text-right"></TableHead>
             </TableRow>
@@ -49,7 +50,7 @@ export function ActivePositionsTable() {
           <TableBody>
             {activeTrades.length === 0 ? (
               <TableRow className="border-border">
-                <TableCell colSpan={8} className="text-center text-muted-foreground py-8">No active positions</TableCell>
+                <TableCell colSpan={9} className="text-center text-muted-foreground py-8">No active positions</TableCell>
               </TableRow>
             ) : (
               activeTrades.map((trade) => (
@@ -66,6 +67,18 @@ export function ActivePositionsTable() {
                     {(trade.profitLoss ?? 0) >= 0 ? '+' : ''}${(trade.profitLoss ?? 0).toFixed(2)}
                   </TableCell>
                   <TableCell className="font-mono text-right text-muted-foreground">{(trade.stopLoss ?? 0).toFixed(trade.symbol.includes('JPY') ? 3 : 5)}</TableCell>
+                  <TableCell className="font-mono text-right">
+                    {trade.trailingStopActive ? (
+                      <span className="inline-flex items-center gap-1 text-blue-400">
+                        <TrendingUp className="w-3 h-3" />
+                        {trade.trailingStopLevel?.toFixed(trade.symbol.includes('JPY') ? 3 : 5) ?? '—'}
+                      </span>
+                    ) : trade.breakevenApplied ? (
+                      <span className="text-yellow-400 text-xs">BE</span>
+                    ) : (
+                      <span className="text-muted-foreground text-xs">—</span>
+                    )}
+                  </TableCell>
                   <TableCell className="font-mono text-right text-muted-foreground">{(trade.takeProfit ?? 0).toFixed(trade.symbol.includes('JPY') ? 3 : 5)}</TableCell>
                   <TableCell className="text-right">
                     <Button variant="ghost" size="sm" onClick={() => handleClose(trade.id)} className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive">

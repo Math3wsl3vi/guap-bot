@@ -1,4 +1,4 @@
-export type TradeType = 'BUY' | 'SELL';
+export type TradeType = 'BUY' | 'SELL' | 'ACCU' | 'CALL' | 'PUT' | 'DIGITEVEN' | 'DIGITODD' | 'DIGITOVER' | 'DIGITUNDER' | 'DIGITMATCH';
 export type TradeStatus = 'OPEN' | 'CLOSED';
 
 export interface Trade {
@@ -21,4 +21,5 @@ export interface Trade {
   closedAt?: Date;
   duration?: number;
   strategySignal?: string;
+  strategyType?: string;
 }

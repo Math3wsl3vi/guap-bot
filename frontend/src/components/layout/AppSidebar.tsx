@@ -1,11 +1,12 @@
 import { NavLink } from "@/components/NavLink";
 
-import { LayoutDashboard, BarChart3, Settings2, Terminal, Clock, ChevronLeft, ChevronRight, X } from "lucide-react";
+import { LayoutDashboard, BarChart3, Settings2, Terminal, Clock, ChevronLeft, ChevronRight, X, ScrollText } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 
 const navItems = [
   { title: "Dashboard", url: "/", icon: LayoutDashboard },
+  { title: "Trades", url: "/trades", icon: ScrollText },
   { title: "Analytics", url: "/analytics", icon: BarChart3 },
   { title: "Strategy", url: "/strategy", icon: Settings2 },
   { title: "Logs", url: "/logs", icon: Terminal },

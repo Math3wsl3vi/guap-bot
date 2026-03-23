@@ -57,6 +57,7 @@ const TIMEFRAME_MAP: Record<string, number> = {
 
 // Internal symbol → Deriv symbol (frx prefix for real forex/metals)
 const DERIV_SYMBOL_MAP: Record<string, string> = {
+  // ── Forex / Metals ──────────────────────────────────────────────────────────
   XAU_USD: 'frxXAUUSD',
   XAUUSD:  'frxXAUUSD',
   XAG_USD: 'frxXAGUSD',
@@ -80,6 +81,28 @@ const DERIV_SYMBOL_MAP: Record<string, string> = {
   EUR_JPY: 'frxEURJPY',
   GBPJPY:  'frxGBPJPY',
   GBP_JPY: 'frxGBPJPY',
+
+  // ── Crypto ─────────────────────────────────────────────────────────────────
+  BTCUSD:  'cryBTCUSD',
+  BTC_USD: 'cryBTCUSD',
+  ETHUSD:  'cryETHUSD',
+  ETH_USD: 'cryETHUSD',
+  LTCUSD:  'cryLTCUSD',
+  LTC_USD: 'cryLTCUSD',
+
+  // ── Synthetic Indices (1-second tick) ───────────────────────────────────────
+  V10_1S:  '1HZ10V',
+  V25_1S:  '1HZ25V',
+  V50_1S:  '1HZ50V',
+  V75_1S:  '1HZ75V',
+  V100_1S: '1HZ100V',
+
+  // ── Synthetic Indices (2-second tick / standard) ────────────────────────────
+  V10:  'R_10',
+  V25:  'R_25',
+  V50:  'R_50',
+  V75:  'R_75',
+  V100: 'R_100',
 };
 
 export class DerivAdapter implements IBrokerAdapter {
@@ -109,6 +132,10 @@ export class DerivAdapter implements IBrokerAdapter {
   private readonly maxWsReconnectAttempts = 10;
   private wsReconnectTimer: NodeJS.Timeout | null = null;
 
+  // Heartbeat
+  private pingTimer: NodeJS.Timeout | null = null;
+  private readonly pingIntervalMs = 30_000;
+
   constructor(config: DerivConfig) {
     this.config = config;
   }
@@ -120,6 +147,7 @@ export class DerivAdapter implements IBrokerAdapter {
     this.wsReconnectAttempts = 0;
     await this.openWebSocket();
     await this.authorize();
+    this.startHeartbeat();
     logger.info('Deriv adapter connected', {
       component: 'DerivAdapter',
       isDemo: this.config.isDemo,
@@ -129,6 +157,8 @@ export class DerivAdapter implements IBrokerAdapter {
 
   async disconnect(): Promise<void> {
     this._intentionalDisconnect = true;
+
+    this.stopHeartbeat();
 
     if (this.wsReconnectTimer) {
       clearTimeout(this.wsReconnectTimer);
@@ -211,10 +241,30 @@ export class DerivAdapter implements IBrokerAdapter {
     const balance = bal.balance as number;
     const currency = bal.currency as string;
 
+    // When a MULT contract is open, Deriv immediately deducts the stake from balance.
+    // This makes `balance` look like a drawdown to the RiskManager, tripping the
+    // circuit breaker on a profitable open position. Fix: add back locked stakes so
+    // equity = true portfolio value (available balance + locked capital).
+    let lockedStakes = 0;
+    try {
+      const pfResp = await this.send({
+        portfolio: 1,
+        contract_type: ['MULTUP', 'MULTDOWN'],
+      });
+      const pf = pfResp.portfolio as Record<string, unknown>;
+      const contracts = (pf.contracts as Record<string, unknown>[]) ?? [];
+      for (const c of contracts) {
+        const contractId = String(c.contract_id);
+        const cached = this.contractCache.get(contractId);
+        if (cached) lockedStakes += cached.stake;
+      }
+    } catch {
+      // Non-fatal — fall back to balance only
+    }
+
     return {
       balance,
-      // Deriv balance reflects realized P&L; unrealized is in open contracts
-      equity: balance,
+      equity: balance + lockedStakes,
       // Multiplier contracts don't use margin — you stake, not borrow
       margin: 0,
       currency,
@@ -244,6 +294,7 @@ export class DerivAdapter implements IBrokerAdapter {
           entrySpot = cached.entryPrice;
         }
 
+        let pocMultiplier = 0;
         try {
           const detail = await this.send({
             proposal_open_contract: 1,
@@ -253,12 +304,32 @@ export class DerivAdapter implements IBrokerAdapter {
           currentSpot = parseFloat(poc.current_spot as string) || 0;
           entrySpot = parseFloat(poc.entry_spot as string) || entrySpot;
           pnl = parseFloat(poc.profit as string) || 0;
+          pocMultiplier = parseFloat(poc.multiplier as string) || 0;
         } catch {
           // Non-fatal — return what we have
         }
 
         const direction: 'BUY' | 'SELL' = c.contract_type === 'MULTUP' ? 'BUY' : 'SELL';
         const stake = parseFloat(c.buy_price as string) || 0;
+
+        // Seed contractCache for positions from previous sessions so
+        // updateStopLoss / trailing stop can work on them.
+        if (!this.contractCache.has(contractId) && entrySpot > 0 && stake > 0) {
+          this.contractCache.set(contractId, {
+            stake,
+            entryPrice: entrySpot,
+            multiplier: pocMultiplier || (this.config.multiplier ?? 100),
+            direction,
+          });
+          logger.info('Seeded contract cache from open position', {
+            component: 'DerivAdapter',
+            contractId,
+            stake,
+            entryPrice: entrySpot,
+            multiplier: pocMultiplier || (this.config.multiplier ?? 100),
+            direction,
+          });
+        }
         const openedAt = new Date((c.date_start as number ?? c.purchase_time as number) * 1000);
 
         return {
@@ -282,22 +353,19 @@ export class DerivAdapter implements IBrokerAdapter {
   /**
    * Place a Multiplier contract on Deriv.
    *
-   * Position sizing note: `params.size` is the position size in instrument units
-   * (e.g. oz for XAU/USD) as calculated by RiskManager. For Deriv multiplier
-   * contracts this is used directly as the stake in USD — the numbers are
-   * numerically equivalent given the standard position sizing formula:
-   *   units = (balance × riskPct) / (slPips × pipSize)
-   * which, for XAU/USD (pipSize=0.01), produces the correct USD stake.
+   * Position sizing note: `params.size` is the stake in USD as calculated by
+   * RiskManager (or clamped to the broker minimum). It is passed directly to
+   * Deriv as the contract amount — no unit conversion is needed.
    */
   async placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
     const derivSymbol = this.toDerivSymbol(params.symbol);
     const multiplier = this.config.multiplier ?? 100;
     const contractType = params.direction === 'BUY' ? 'MULTUP' : 'MULTDOWN';
 
-    // ── Step 1: probe proposal to get current spot price ────────────────────
+    // ── Step 1: probe proposal to get current spot price & min stake ────────
     const probeResp = await this.send({
       proposal: 1,
-      amount: 1,
+      amount: 1000,  // Use a high amount so the probe succeeds even with high min_stake
       basis: 'stake',
       contract_type: contractType,
       currency: 'USD',
@@ -307,28 +375,80 @@ export class DerivAdapter implements IBrokerAdapter {
     const probeData = probeResp.proposal as Record<string, unknown>;
     const spotPrice = parseFloat(probeData.spot as string) || 0;
     const probeId = probeData.id as string;
+    // Deriv returns per-contract stake bounds
+    const derivMinStake = parseFloat(String(probeData.min_stake ?? '')) || 1;
+    const parsedDerivMaxStake = parseFloat(String(probeData.max_stake ?? ''));
+    const derivMaxStake = Number.isFinite(parsedDerivMaxStake) && parsedDerivMaxStake > 0
+      ? parsedDerivMaxStake
+      : null;
 
     // Forget probe proposal (fire-and-forget, ignore errors)
     this.ws?.send(JSON.stringify({ forget: probeId, req_id: ++this.reqIdCounter }));
 
     // ── Step 2: compute stake and limit order amounts ────────────────────────
-    // Convert instrument units → USD stake:
-    //   stake = units × spotPrice / multiplier
-    // This is derived from: riskAmount = stake × multiplier × delta / spot
-    // and: units = riskAmount / (slPips × pipSize) = riskAmount / delta
-    // Therefore: stake = riskAmount × spot / (multiplier × delta) = units × spot / multiplier
-    // Minimum stake on Deriv is $1.
-    const stake = Math.max(1, parseFloat((params.size * spotPrice / multiplier).toFixed(2)));
+    // params.size is already the stake in USD (from RiskManager / minPositionSize).
+    // Deriv enforces a $0.10 minimum on limit_order amounts (stop_loss / take_profit).
+    // Back-calculate the minimum stake needed to satisfy this:
+    //   minStake = 0.10 × spot / (multiplier × slDelta)
+    const DERIV_MIN_LIMIT = 0.10;
+    const rawStake = params.size;
+    let minStake = derivMinStake; // Use Deriv's reported minimum
+    if (params.stopLevel !== undefined && spotPrice > 0) {
+      const slDelta = Math.abs(spotPrice - params.stopLevel);
+      if (slDelta > 0) {
+        minStake = Math.max(minStake, parseFloat((DERIV_MIN_LIMIT * spotPrice / (multiplier * slDelta)).toFixed(2)));
+      }
+    }
+    const requestedStake = Math.max(minStake, parseFloat(rawStake.toFixed(2)));
+    let stake = requestedStake;
+
+    if (derivMaxStake !== null && requestedStake > derivMaxStake) {
+      stake = parseFloat(derivMaxStake.toFixed(2));
+      logger.warn('Requested stake exceeds Deriv max_stake — clamped to broker limit', {
+        component: 'DerivAdapter',
+        symbol: params.symbol,
+        requestedStake,
+        derivMaxStake,
+        derivMinStake,
+        multiplier,
+      });
+    }
+
+    if (stake < derivMinStake) {
+      throw new Error(
+        `Deriv stake constraints invalid for ${params.symbol}: computed stake ${stake.toFixed(2)} is below min_stake ${derivMinStake.toFixed(2)}.`,
+      );
+    }
 
     const limitOrder: Record<string, number> = {};
-    if (params.stopLevel !== undefined && spotPrice > 0) {
+    const clampLimitAmount = (label: 'stop_loss' | 'take_profit', value: number): number => {
+      const clamped = Math.min(stake, Math.max(DERIV_MIN_LIMIT, value));
+      const rounded = parseFloat(clamped.toFixed(2));
+      if (Math.abs(rounded - value) >= 0.01) {
+        logger.warn(`Deriv ${label} clamped to valid range`, {
+          component: 'DerivAdapter',
+          symbol: params.symbol,
+          requested: parseFloat(value.toFixed(2)),
+          clamped: rounded,
+          min: DERIV_MIN_LIMIT,
+          max: parseFloat(stake.toFixed(2)),
+          stake,
+          multiplier,
+        });
+      }
+      return rounded;
+    };
+
+    if (params.stopLevel !== undefined && Number.isFinite(params.stopLevel) && spotPrice > 0) {
       const delta = Math.abs(spotPrice - params.stopLevel);
       // stop_loss is the max loss in account currency (USD)
-      limitOrder.stop_loss = parseFloat((stake * multiplier * delta / spotPrice).toFixed(2));
+      const rawStopLoss = stake * multiplier * delta / spotPrice;
+      limitOrder.stop_loss = clampLimitAmount('stop_loss', rawStopLoss);
     }
-    if (params.profitLevel !== undefined && spotPrice > 0) {
+    if (params.profitLevel !== undefined && Number.isFinite(params.profitLevel) && spotPrice > 0) {
       const delta = Math.abs(params.profitLevel - spotPrice);
-      limitOrder.take_profit = parseFloat((stake * multiplier * delta / spotPrice).toFixed(2));
+      const rawTakeProfit = stake * multiplier * delta / spotPrice;
+      limitOrder.take_profit = clampLimitAmount('take_profit', rawTakeProfit);
     }
 
     // ── Step 3: real proposal with correct stake and limits ──────────────────
@@ -369,6 +489,10 @@ export class DerivAdapter implements IBrokerAdapter {
       direction: params.direction,
       contractType,
       stake,
+      derivMinStake,
+      derivMaxStake,
+      rawStake: parseFloat(rawStake.toFixed(2)),
+      requestedStake,
       multiplier,
       spotPrice,
       stopLossUSD: limitOrder.stop_loss,
@@ -395,6 +519,228 @@ export class DerivAdapter implements IBrokerAdapter {
     this.contractCache.delete(dealId);
     logger.info('Position closed', { component: 'DerivAdapter', dealId, soldFor, pnl });
     return { pnl };
+  }
+
+  // ─── Accumulator (ACCU) contracts ────────────────────────────────────────
+
+  async placeAccumulator(params: {
+    symbol: string;
+    stake: number;
+    growthRate: number;
+    takeProfitUSD?: number;
+  }): Promise<{ dealId: string; stake: number; symbol: string; openedAt: Date }> {
+    const derivSymbol = this.toDerivSymbol(params.symbol);
+
+    // Step 1: get proposal
+    const proposalPayload: Record<string, unknown> = {
+      proposal: 1,
+      amount: params.stake,
+      basis: 'stake',
+      contract_type: 'ACCU',
+      currency: 'USD',
+      symbol: derivSymbol,
+      growth_rate: params.growthRate,
+    };
+    if (params.takeProfitUSD && params.takeProfitUSD > 0) {
+      proposalPayload.limit_order = { take_profit: params.takeProfitUSD };
+    }
+
+    const proposalResp = await this.send(proposalPayload);
+    const proposalData = proposalResp.proposal as Record<string, unknown>;
+    const proposalId = proposalData.id as string;
+
+    // Step 2: buy the proposal
+    const buyResp = await this.send({ buy: proposalId, price: params.stake });
+    const buyData = buyResp.buy as Record<string, unknown>;
+    const contractId = String(buyData.contract_id);
+
+    // Cache for closePosition (sell)
+    this.contractCache.set(contractId, {
+      stake: params.stake,
+      entryPrice: 0, // accumulators don't have a directional entry
+      multiplier: 0,
+      direction: 'BUY', // placeholder — ACCU is non-directional
+    });
+
+    logger.info('Accumulator contract placed', {
+      component: 'DerivAdapter',
+      contractId,
+      stake: params.stake,
+      growthRate: params.growthRate,
+      takeProfitUSD: params.takeProfitUSD,
+      symbol: derivSymbol,
+    });
+
+    return {
+      dealId: contractId,
+      stake: params.stake,
+      symbol: params.symbol,
+      openedAt: new Date(),
+    };
+  }
+
+  /**
+   * Check the live status of an open contract (accumulator or multiplier).
+   * Returns current payout, profit, and whether the contract is still open.
+   */
+  async getContractStatus(contractId: string): Promise<{
+    isOpen: boolean;
+    profit: number;
+    currentPayout: number;
+    isSold: boolean;
+  }> {
+    try {
+      const resp = await this.send({
+        proposal_open_contract: 1,
+        contract_id: parseInt(contractId),
+      });
+      const poc = resp.proposal_open_contract as Record<string, unknown>;
+      const status = poc.status as string | undefined;
+      const profit = parseFloat(poc.profit as string) || 0;
+      const bidPrice = parseFloat(poc.bid_price as string) || 0;
+      const isSold = status === 'sold';
+      const isOpen = status === 'open';
+
+      return { isOpen, profit, currentPayout: bidPrice, isSold };
+    } catch {
+      return { isOpen: false, profit: 0, currentPayout: 0, isSold: false };
+    }
+  }
+
+  // ─── Binary Options (Rise/Fall, Even/Odd, Digit Over/Under) ────────────
+
+  /**
+   * Query Deriv for available contract types and durations for a symbol.
+   * Useful for diagnosing which contract_type + duration_unit combos work.
+   */
+  async getContractsFor(symbol: string): Promise<Record<string, unknown>> {
+    const derivSymbol = this.toDerivSymbol(symbol);
+    return this.send({ contracts_for: derivSymbol, currency: 'USD' });
+  }
+
+  async placeBinaryOption(params: {
+    symbol: string;
+    stake: number;
+    contractType: string;
+    durationTicks: number;
+    barrier?: number;
+  }): Promise<{ dealId: string; stake: number; symbol: string; payout: number; openedAt: Date }> {
+    const derivSymbol = this.toDerivSymbol(params.symbol);
+
+    const buildPayload = (durationUnit: string, duration: number): Record<string, unknown> => {
+      const payload: Record<string, unknown> = {
+        proposal: 1,
+        amount: params.stake,
+        basis: 'stake',
+        contract_type: params.contractType,
+        currency: 'USD',
+        duration,
+        duration_unit: durationUnit,
+        symbol: derivSymbol,
+      };
+      // Barrier is required for DIGITOVER, DIGITUNDER, DIGITMATCH, DIGITDIFF
+      if (params.barrier !== undefined) {
+        payload.barrier = String(params.barrier);
+      }
+      return payload;
+    };
+
+    // Try multiple duration unit + value combos until one works.
+    // Deriv supports: t (ticks), s (seconds), m (minutes).
+    // Not all combos are valid for all symbols and contract types.
+    const tickInterval = derivSymbol.startsWith('1HZ') ? 1 : 2;
+    const attempts: Array<{ unit: string; duration: number }> = [
+      { unit: 't', duration: params.durationTicks },
+      { unit: 's', duration: Math.max(15, params.durationTicks * tickInterval) }, // Deriv min is often 15s
+      { unit: 's', duration: 30 },
+      { unit: 'm', duration: 1 },
+    ];
+
+    let proposalResp: Record<string, unknown> | null = null;
+    let lastError: Error | null = null;
+
+    for (const attempt of attempts) {
+      try {
+        proposalResp = await this.send(buildPayload(attempt.unit, attempt.duration));
+        if (proposalResp) {
+          logger.debug('Binary option proposal accepted', {
+            component: 'DerivAdapter',
+            contractType: params.contractType,
+            symbol: derivSymbol,
+            durationUnit: attempt.unit,
+            duration: attempt.duration,
+          });
+          break;
+        }
+      } catch (err) {
+        lastError = err as Error;
+        const msg = lastError.message;
+        if (msg.includes('OfferingsValidationError')) {
+          // This combo doesn't work — try next
+          continue;
+        }
+        // Non-duration error — don't retry
+        throw err;
+      }
+    }
+
+    if (!proposalResp) {
+      throw lastError ?? new Error(`No valid duration found for ${params.contractType} on ${derivSymbol}`);
+    }
+    const proposalData = proposalResp.proposal as Record<string, unknown>;
+    const proposalId = proposalData.id as string;
+    const payout = parseFloat(proposalData.payout as string) || 0;
+
+    // Buy the proposal
+    const buyResp = await this.send({ buy: proposalId, price: params.stake });
+    const buyData = buyResp.buy as Record<string, unknown>;
+    const contractId = String(buyData.contract_id);
+    const buyPayout = parseFloat(buyData.payout as string) || payout;
+
+    logger.info('Binary option contract placed', {
+      component: 'DerivAdapter',
+      contractId,
+      contractType: params.contractType,
+      stake: params.stake,
+      durationTicks: params.durationTicks,
+      barrier: params.barrier,
+      payout: buyPayout,
+      symbol: derivSymbol,
+    });
+
+    return {
+      dealId: contractId,
+      stake: params.stake,
+      symbol: params.symbol,
+      payout: buyPayout,
+      openedAt: new Date(),
+    };
+  }
+
+  /**
+   * Check the status of a binary option contract.
+   * Binary options auto-settle — once duration ends, profit is determined.
+   */
+  async getBinaryOptionStatus(contractId: string): Promise<{
+    isOpen: boolean;
+    profit: number;
+    payout: number;
+  }> {
+    try {
+      const resp = await this.send({
+        proposal_open_contract: 1,
+        contract_id: parseInt(contractId),
+      });
+      const poc = resp.proposal_open_contract as Record<string, unknown>;
+      const status = poc.status as string | undefined;
+      const profit = parseFloat(poc.profit as string) || 0;
+      const payout = parseFloat(poc.payout as string) || 0;
+      const isOpen = status === 'open';
+
+      return { isOpen, profit, payout };
+    } catch {
+      return { isOpen: false, profit: 0, payout: 0 };
+    }
   }
 
   // ─── Pending Orders (not supported on Deriv Multipliers) ─────────────────
@@ -424,10 +770,40 @@ export class DerivAdapter implements IBrokerAdapter {
       );
     }
 
+    // Deriv stop_loss represents the maximum loss from ENTRY PRICE (not current price).
+    // Trailing a SL closer to entry reduces priceDelta, which can drop below Deriv's
+    // minimum of $0.10. We check before sending to avoid spamming broker errors.
+    const DERIV_MIN_SL_USD = 0.10;
+
     const priceDelta = Math.abs(cached.entryPrice - stopLevel);
-    const newStopLossUSD = parseFloat(
+    let newStopLossUSD = parseFloat(
       (cached.stake * cached.multiplier * priceDelta / cached.entryPrice).toFixed(2),
     );
+
+    if (newStopLossUSD < DERIV_MIN_SL_USD) {
+      logger.debug('SL update skipped — computed USD below Deriv minimum (trailing too close to entry)', {
+        component: 'DerivAdapter',
+        dealId,
+        stopLevel,
+        computedSLusd: newStopLossUSD,
+        minimumSLusd: DERIV_MIN_SL_USD,
+        entryPrice: cached.entryPrice,
+        stake: cached.stake,
+        hint: 'Disable TRAILING_STOP_ENABLED or increase stake to support trailing on Deriv',
+      });
+      return;
+    }
+
+    // Deriv caps stop loss at the stake (max loss = buy_price)
+    if (newStopLossUSD > cached.stake) {
+      logger.warn('Stop loss USD clamped to stake (Deriv max)', {
+        component: 'DerivAdapter',
+        dealId,
+        computed: newStopLossUSD,
+        stake: cached.stake,
+      });
+      newStopLossUSD = parseFloat(cached.stake.toFixed(2));
+    }
 
     await this.send({
       contract_update: 1,
@@ -606,6 +982,24 @@ export class DerivAdapter implements IBrokerAdapter {
     });
   }
 
+  // ─── Private: heartbeat ──────────────────────────────────────────────────
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.pingTimer = setInterval(() => {
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify({ ping: 1, req_id: ++this.reqIdCounter }));
+      }
+    }, this.pingIntervalMs);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+  }
+
   // ─── Private: reconnect ──────────────────────────────────────────────────
 
   private scheduleReconnect(): void {
@@ -631,6 +1025,7 @@ export class DerivAdapter implements IBrokerAdapter {
       try {
         await this.openWebSocket();
         await this.authorize();
+        this.startHeartbeat();
         this.wsReconnectAttempts = 0;
         if (this.tickCallback && this.subscribedSymbol) {
           await this.subscribeToTicks(this.subscribedSymbol, this.tickCallback);
