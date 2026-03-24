@@ -18,7 +18,7 @@ import { TimeframeAggregator } from './services/TimeframeAggregator';
 import { Candle, Timeframe } from './models/Candle';
 import { Trade } from './models/Trade';
 import { TechnicalIndicators } from './indicators/TechnicalIndicators';
-import { TelegramService, createTelegramService } from './services/TelegramService';
+import { TelegramService, createTelegramService, DailyReport } from './services/TelegramService';
 const API_PORT = parseInt(process.env.PORT ?? process.env.API_PORT ?? '3001');
 const SIMULATED_BALANCE = process.env.SIMULATED_BALANCE
   ? parseFloat(process.env.SIMULATED_BALANCE)
@@ -521,7 +521,9 @@ async function main(): Promise<void> {
       }).catch(() => {});
 
       // Update DB record when position is closed by broker (TP/SL)
-      dbService.updateTrade(event.brokerId, {
+      // Use updateTradeByBrokerId because scalar strategy trades have a UUID as `id`
+      // but the PositionMonitor only knows the Deriv contract ID (stored as broker_id).
+      dbService.updateTradeByBrokerId(event.brokerId, {
         status: 'CLOSED',
         exitPrice: event.exitPrice,
         profitLoss: event.pnl,
@@ -819,6 +821,7 @@ async function main(): Promise<void> {
   // ─── Daily loss reset at midnight UTC ─────────────────────────────────────
 
   scheduleDailyReset(riskManager);
+  scheduleDailyReport(telegram, dbService, adapter);
 
   // ─── Start market data pipeline ────────────────────────────────────────────
 
@@ -1666,6 +1669,105 @@ function scheduleDailyReset(riskManager: RiskManager): void {
       logger.info('Daily loss counter reset at UTC midnight', { component: 'Bot' });
       scheduleNext();
     }, msUntilMidnight());
+  };
+
+  scheduleNext();
+}
+
+/** Schedule the daily Telegram report to fire at 23:55 UTC each day. */
+function scheduleDailyReport(
+  telegram: TelegramService | null,
+  dbService: DatabaseService,
+  adapter: IBrokerAdapter,
+): void {
+  if (!telegram) return;
+
+  const msUntilReportTime = (): number => {
+    const now = new Date();
+    const target = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 55, 0),
+    );
+    // If we've already passed 23:55 today, schedule for tomorrow
+    if (target.getTime() <= now.getTime()) {
+      target.setUTCDate(target.getUTCDate() + 1);
+    }
+    return target.getTime() - now.getTime();
+  };
+
+  const scheduleNext = () => {
+    const delay = msUntilReportTime();
+    logger.info('Daily Telegram report scheduled', {
+      component: 'Bot',
+      firesIn: `${Math.round(delay / 60_000)}m`,
+    });
+
+    setTimeout(async () => {
+      try {
+        const today = new Date().toISOString().split('T')[0];
+        const trades = await dbService.getTradesByDate(today);
+        const account = applyBalanceCap(await adapter.getAccountInfo());
+
+        const closed = trades.filter((t) => t.status === 'CLOSED');
+        const open = trades.filter((t) => t.status === 'OPEN');
+        const wins = closed.filter((t) => t.profitLoss > 0);
+        const losses = closed.filter((t) => t.profitLoss <= 0);
+        const grossProfit = wins.reduce((s, t) => s + t.profitLoss, 0);
+        const grossLoss = Math.abs(losses.reduce((s, t) => s + t.profitLoss, 0));
+        const netPnL = grossProfit - grossLoss;
+        const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? Infinity : 0;
+        const avgWin = wins.length > 0 ? grossProfit / wins.length : 0;
+        const avgLoss = losses.length > 0 ? grossLoss / losses.length : 0;
+        const winRate = closed.length > 0 ? (wins.length / closed.length) * 100 : 0;
+        const bestTrade = closed.length > 0 ? Math.max(...closed.map((t) => t.profitLoss)) : 0;
+        const worstTrade = closed.length > 0 ? Math.min(...closed.map((t) => t.profitLoss)) : 0;
+        const totalStaked = closed.reduce((s, t) => s + t.quantity, 0);
+        const roi = totalStaked > 0 ? (netPnL / totalStaked) * 100 : 0;
+
+        // Strategy breakdown
+        const stratMap = new Map<string, { wins: number; losses: number; pnl: number; trades: number }>();
+        for (const t of closed) {
+          const key = t.strategyType ?? 'Unknown';
+          const entry = stratMap.get(key) ?? { wins: 0, losses: 0, pnl: 0, trades: 0 };
+          entry.trades++;
+          entry.pnl += t.profitLoss;
+          if (t.profitLoss > 0) entry.wins++; else entry.losses++;
+          stratMap.set(key, entry);
+        }
+
+        const report: DailyReport = {
+          date: today,
+          balance: account.balance,
+          trades: trades.length,
+          closed: closed.length,
+          openPositions: open.length,
+          wins: wins.length,
+          losses: losses.length,
+          winRate,
+          grossProfit,
+          grossLoss,
+          netPnL,
+          profitFactor,
+          avgWin,
+          avgLoss,
+          bestTrade,
+          worstTrade,
+          totalStaked,
+          roi,
+          byStrategy: [...stratMap.entries()]
+            .sort((a, b) => b[1].pnl - a[1].pnl)
+            .map(([name, s]) => ({ name: name.replace(/_/g, ' '), ...s })),
+        };
+
+        await telegram.sendDailyReport(report);
+        logger.info('Daily Telegram report sent', { component: 'Bot', date: today, trades: trades.length });
+      } catch (err) {
+        logger.error('Failed to send daily Telegram report', {
+          component: 'Bot',
+          error: (err as Error).message,
+        });
+      }
+      scheduleNext();
+    }, delay);
   };
 
   scheduleNext();

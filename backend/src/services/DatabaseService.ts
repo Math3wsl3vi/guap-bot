@@ -161,6 +161,67 @@ export class DatabaseService {
     logger.debug('Trade updated', { component: COMPONENT, tradeId: id });
   }
 
+  /**
+   * Same as updateTrade but matches on broker_id instead of id.
+   * Used when closing multiplier contracts where the trade's primary key is a UUID
+   * but the PositionMonitor only knows the broker deal/contract ID.
+   */
+  async updateTradeByBrokerId(brokerId: string, updates: Partial<Trade>): Promise<void> {
+    const colMap: Record<keyof Trade, string> = {
+      id: 'id',
+      brokerId: 'broker_id',
+      symbol: 'symbol',
+      type: 'type',
+      entryPrice: 'entry_price',
+      exitPrice: 'exit_price',
+      currentPrice: 'exit_price',
+      stopLoss: 'stop_loss',
+      takeProfit: 'take_profit',
+      quantity: 'quantity',
+      profitLoss: 'profit_loss',
+      profitLossPercent: 'profit_loss_pct',
+      commission: 'commission',
+      slippage: 'slippage',
+      status: 'status',
+      strategySignal: 'strategy_signal',
+      strategyType: 'strategy_type',
+      openedAt: 'opened_at',
+      closedAt: 'closed_at',
+      duration: 'duration_ms',
+    };
+
+    const setClauses: string[] = [];
+    const values: unknown[] = [];
+    let paramIdx = 1;
+
+    for (const [key, value] of Object.entries(updates) as [keyof Trade, unknown][]) {
+      if (key === 'id') continue;
+      const col = colMap[key];
+      if (!col) continue;
+      setClauses.push(`${col} = $${paramIdx++}`);
+      values.push(value);
+    }
+
+    if (setClauses.length === 0) return;
+
+    values.push(brokerId);
+    await this.pool.query(
+      `UPDATE trades SET ${setClauses.join(', ')} WHERE broker_id = $${paramIdx}`,
+      values,
+    );
+    logger.debug('Trade updated by brokerId', { component: COMPONENT, brokerId });
+  }
+
+  /** Fetch all trades opened on a given date (YYYY-MM-DD, defaults to today). */
+  async getTradesByDate(date?: string): Promise<Trade[]> {
+    const day = date ?? new Date().toISOString().split('T')[0];
+    const result = await this.pool.query<Record<string, unknown>>(
+      `SELECT * FROM trades WHERE opened_at >= $1::date AND opened_at < ($1::date + interval '1 day') ORDER BY opened_at ASC`,
+      [day],
+    );
+    return result.rows.map(this.rowToTrade);
+  }
+
   /** Fetch the most recent `limit` closed and open trades, newest first. */
   async getTradeHistory(limit = 100): Promise<Trade[]> {
     const result = await this.pool.query<Record<string, unknown>>(

@@ -95,6 +95,67 @@ export class TelegramService {
     const text = `ℹ️ ${message}`;
     await this.send(text);
   }
+
+  async sendDailyReport(report: DailyReport): Promise<void> {
+    const { date, balance, trades, closed, wins, losses, winRate, grossProfit, grossLoss, netPnL, profitFactor, avgWin, avgLoss, bestTrade, worstTrade, totalStaked, roi, byStrategy, openPositions } = report;
+
+    let text =
+      `📊 <b>DAILY REPORT — ${date}</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+
+      `💳 <b>Balance:</b> $${balance.toFixed(2)}\n` +
+      `📈 <b>Total Trades:</b> ${trades} (${closed} closed, ${openPositions} open)\n` +
+      `✅ <b>Wins:</b> ${wins}  ❌ <b>Losses:</b> ${losses}\n` +
+      `🎯 <b>Win Rate:</b> ${winRate.toFixed(1)}%\n\n` +
+
+      `💰 <b>Net P&L:</b> ${netPnL >= 0 ? '+' : ''}$${netPnL.toFixed(2)}\n` +
+      `📗 <b>Gross Profit:</b> $${grossProfit.toFixed(2)}\n` +
+      `📕 <b>Gross Loss:</b> $${grossLoss.toFixed(2)}\n` +
+      `⚖️ <b>Profit Factor:</b> ${profitFactor === Infinity ? '∞' : profitFactor.toFixed(2)}\n` +
+      `📊 <b>ROI:</b> ${roi.toFixed(2)}%\n\n` +
+
+      `🏆 <b>Best Trade:</b> +$${bestTrade.toFixed(2)}\n` +
+      `💥 <b>Worst Trade:</b> $${worstTrade.toFixed(2)}\n` +
+      `📗 <b>Avg Win:</b> $${avgWin.toFixed(2)}\n` +
+      `📕 <b>Avg Loss:</b> $${avgLoss.toFixed(2)}\n` +
+      `💵 <b>Total Staked:</b> $${totalStaked.toFixed(2)}\n`;
+
+    if (byStrategy.length > 0) {
+      text += `\n<b>By Strategy:</b>\n`;
+      for (const s of byStrategy) {
+        const icon = s.pnl >= 0 ? '🟢' : '🔴';
+        text += `${icon} ${s.name}: ${s.wins}W/${s.losses}L (${s.trades > 0 ? ((s.wins / s.trades) * 100).toFixed(0) : 0}%) → ${s.pnl >= 0 ? '+' : ''}$${s.pnl.toFixed(2)}\n`;
+      }
+    }
+
+    if (closed === 0) {
+      text = `📊 <b>DAILY REPORT — ${date}</b>\n━━━━━━━━━━━━━━━━━━━━━\n\n💳 <b>Balance:</b> $${balance.toFixed(2)}\n📭 No trades today.`;
+    }
+
+    await this.send(text);
+  }
+}
+
+export interface DailyReport {
+  date: string;
+  balance: number;
+  trades: number;
+  closed: number;
+  openPositions: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  grossProfit: number;
+  grossLoss: number;
+  netPnL: number;
+  profitFactor: number;
+  avgWin: number;
+  avgLoss: number;
+  bestTrade: number;
+  worstTrade: number;
+  totalStaked: number;
+  roi: number;
+  byStrategy: { name: string; trades: number; wins: number; losses: number; pnl: number }[];
 }
 
 /** Build a TelegramService from env vars. Returns null if not configured. */
