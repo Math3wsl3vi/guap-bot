@@ -13,7 +13,7 @@ import {
   TradingPreset,
 } from '@/types';
 
-const BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:3001';
+const BASE = import.meta.env.VITE_API_URL ?? '';
 
 async function get<T>(path: string, params?: Record<string, string | number>): Promise<T> {
   const url = new URL(`${BASE}${path}`);
@@ -126,7 +126,6 @@ export function buildExportUrl(format: 'csv' | 'pdf', filters: TradeFilters = {}
   return url.toString();
 }
 
-export const WS_URL = (import.meta.env.VITE_API_URL ?? 'http://localhost:3001').replace(
-  /^http/,
-  'ws',
-);
+export const WS_URL = import.meta.env.VITE_API_URL
+  ? import.meta.env.VITE_API_URL.replace(/^http/, 'ws')
+  : `ws://${window.location.host}`;

@@ -1,5 +1,6 @@
 import http from 'http';
 import os from 'os';
+import path from 'path';
 import express, { Request, Response, NextFunction } from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
 import { IBrokerAdapter } from './IBrokerAdapter';
@@ -82,6 +83,7 @@ export class ApiServer {
 
     this.setupMiddleware();
     this.setupRoutes();
+    this.setupStaticFrontend();
     this.setupWebSocket();
   }
 
@@ -1174,6 +1176,17 @@ export class ApiServer {
       if (client.readyState === WebSocket.OPEN) {
         client.send(payload);
       }
+    });
+  }
+
+  // ─── Static Frontend (SPA) ───────────────────────────────────────────────
+
+  private setupStaticFrontend(): void {
+    const frontendDir = path.join(__dirname, '..', '..', 'public');
+    this.app.use(express.static(frontendDir));
+    // SPA catch-all: any non-API route serves index.html for React Router
+    this.app.get('*', (_req: Request, res: Response) => {
+      res.sendFile(path.join(frontendDir, 'index.html'));
     });
   }
 

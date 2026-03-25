@@ -1,6 +1,8 @@
 services:
   bot:
-    build: .
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
     container_name: guap-bot
     restart: unless-stopped
     ports:
