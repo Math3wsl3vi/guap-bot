@@ -128,4 +128,4 @@ export function buildExportUrl(format: 'csv' | 'pdf', filters: TradeFilters = {}
 
 export const WS_URL = import.meta.env.VITE_API_URL
   ? import.meta.env.VITE_API_URL.replace(/^http/, 'ws')
-  : `ws://${window.location.host}`;
+  : `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`;
