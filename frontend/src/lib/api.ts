@@ -13,20 +13,24 @@ import {
   TradingPreset,
 } from '@/types';
 
-const BASE = import.meta.env.VITE_API_URL ?? '';
+const BASE = import.meta.env.VITE_API_URL || '';
 
-async function get<T>(path: string, params?: Record<string, string | number>): Promise<T> {
-  const url = new URL(`${BASE}${path}`);
+function toUrl(path: string, params?: Record<string, string | number>): string {
+  const url = new URL(`${BASE}${path}`, window.location.origin);
   if (params) {
     Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, String(v)));
   }
-  const res = await fetch(url.toString());
+  return url.toString();
+}
+
+async function get<T>(path: string, params?: Record<string, string | number>): Promise<T> {
+  const res = await fetch(toUrl(path, params));
   if (!res.ok) throw new Error(`GET ${path} failed: ${res.status}`);
   return res.json() as Promise<T>;
 }
 
 async function post<T>(path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetch(toUrl(path), {
     method: 'POST',
     headers: body != null ? { 'Content-Type': 'application/json' } : undefined,
     body: body != null ? JSON.stringify(body) : undefined,
@@ -36,7 +40,7 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
 }
 
 async function put<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetch(toUrl(path), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -115,15 +119,15 @@ export const api = {
 };
 
 export function buildExportUrl(format: 'csv' | 'pdf', filters: TradeFilters = {}): string {
-  const url = new URL(`${BASE}/api/trades/export/${format}`);
-  if (filters.from) url.searchParams.set('from', filters.from);
-  if (filters.to) url.searchParams.set('to', filters.to);
-  if (filters.strategy) url.searchParams.set('strategy', filters.strategy);
-  if (filters.status) url.searchParams.set('status', filters.status);
-  if (filters.outcome) url.searchParams.set('outcome', filters.outcome);
-  if (filters.minSize != null) url.searchParams.set('minSize', String(filters.minSize));
-  if (filters.maxSize != null) url.searchParams.set('maxSize', String(filters.maxSize));
-  return url.toString();
+  const params: Record<string, string | number> = {};
+  if (filters.from) params.from = filters.from;
+  if (filters.to) params.to = filters.to;
+  if (filters.strategy) params.strategy = filters.strategy;
+  if (filters.status) params.status = filters.status;
+  if (filters.outcome) params.outcome = filters.outcome;
+  if (filters.minSize != null) params.minSize = filters.minSize;
+  if (filters.maxSize != null) params.maxSize = filters.maxSize;
+  return toUrl(`/api/trades/export/${format}`, params);
 }
 
 export const WS_URL = import.meta.env.VITE_API_URL
